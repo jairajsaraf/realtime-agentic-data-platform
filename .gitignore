@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# uv / venv
+.venv/
+
+# Local state (catalog db, warehouse data, localstack volume)
+_warehouse/
+.localstack/
+*.db
+
+# Environment / secrets
+.env
+
+# OS
+.DS_Store
+Thumbs.db

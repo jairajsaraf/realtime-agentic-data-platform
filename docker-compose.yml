@@ -1,0 +1,20 @@
+# LocalStack S3 for the local Iceberg warehouse.
+# Bring up with:  docker compose up -d   (or `make localstack-up`)
+# The S3 edge endpoint is http://localhost:4566 — see RTDP_S3_ENDPOINT_URL.
+services:
+  localstack:
+    image: localstack/localstack:3
+    container_name: rtdp-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEBUG=0
+      - PERSISTENCE=0
+    volumes:
+      - "./.localstack:/var/lib/localstack"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20

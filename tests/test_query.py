@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
 from pyiceberg.expressions import (
@@ -216,6 +217,43 @@ def test_resolve_snapshot_before_history_raises(two_snapshots):
     settings, table, r1, r2 = two_snapshots
     with pytest.raises(query.SnapshotNotFoundError):
         query.resolve_snapshot_id(table, as_of_timestamp=datetime(2000, 1, 1, tzinfo=UTC))
+
+
+def _fake_table(snapshots):
+    # resolve_snapshot_id's timestamp path reads only table.metadata.snapshots.
+    return SimpleNamespace(metadata=SimpleNamespace(snapshots=list(snapshots)))
+
+
+def test_resolve_snapshot_timestamp_tie_breaks_to_newest_sequence():
+    # Two commits at the SAME millisecond, older one listed first: a plain max-by-timestamp
+    # would return that first (older) snapshot. The sequence tie-break must pick the newest.
+    from datetime import UTC, datetime
+
+    ts_ms = 1_700_000_000_000
+    table = _fake_table(
+        [
+            SimpleNamespace(snapshot_id=111, timestamp_ms=ts_ms, sequence_number=1),
+            SimpleNamespace(snapshot_id=222, timestamp_ms=ts_ms, sequence_number=2),
+        ]
+    )
+    as_of = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
+    assert query.resolve_snapshot_id(table, as_of_timestamp=as_of) == 222
+
+
+def test_resolve_snapshot_timestamp_handles_missing_sequence_number():
+    # sequence_number is int | None in pyiceberg; a None must not raise — newest by
+    # timestamp still wins and the key falls back safely.
+    from datetime import UTC, datetime
+
+    ts_ms = 1_700_000_000_000
+    table = _fake_table(
+        [
+            SimpleNamespace(snapshot_id=111, timestamp_ms=ts_ms - 10, sequence_number=None),
+            SimpleNamespace(snapshot_id=222, timestamp_ms=ts_ms, sequence_number=None),
+        ]
+    )
+    as_of = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
+    assert query.resolve_snapshot_id(table, as_of_timestamp=as_of) == 222
 
 
 # ------------------------------------------------------------- metadata/health

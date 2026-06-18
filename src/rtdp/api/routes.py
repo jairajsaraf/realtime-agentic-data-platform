@@ -51,9 +51,10 @@ def get_table(request: Request) -> Table:
 
 
 def _clamp_limit(limit: int | None, settings: Settings) -> int:
-    if limit is None:
-        return settings.api_default_limit
-    return min(limit, settings.api_max_limit)
+    # The configured default is itself capped at api_max_limit, so a deployment that
+    # sets api_default_limit above api_max_limit can't bypass the advertised cap.
+    effective = settings.api_default_limit if limit is None else limit
+    return min(effective, settings.api_max_limit)
 
 
 # Shared, reusable query-parameter annotations.

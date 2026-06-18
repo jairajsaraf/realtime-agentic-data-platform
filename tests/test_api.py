@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
 from rtdp.api import create_app
+from rtdp.api.routes import _clamp_limit
 from rtdp.ingest import run_ingest
 from rtdp.sources.synthetic import SyntheticSource
 
@@ -166,3 +168,26 @@ def test_openapi_lists_all_endpoints(client):
         "/snapshots",
         "/meta",
     } <= paths
+
+
+# --------------------------------------------------------------- limit clamping
+def _limits(default, maximum):
+    # _clamp_limit only reads these two attributes — avoid Settings/.env coupling.
+    return SimpleNamespace(api_default_limit=default, api_max_limit=maximum)
+
+
+def test_clamp_limit_default_under_max_uses_default():
+    assert _clamp_limit(None, _limits(default=50, maximum=100)) == 50
+
+
+def test_clamp_limit_default_over_max_is_capped():
+    # A misconfigured default must not bypass the advertised cap.
+    assert _clamp_limit(None, _limits(default=500, maximum=100)) == 100
+
+
+def test_clamp_limit_explicit_is_capped_at_max():
+    assert _clamp_limit(9999, _limits(default=100, maximum=100)) == 100
+
+
+def test_clamp_limit_explicit_under_max_is_unchanged():
+    assert _clamp_limit(25, _limits(default=100, maximum=100)) == 25

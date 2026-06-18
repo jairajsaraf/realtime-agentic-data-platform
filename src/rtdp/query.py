@@ -149,8 +149,10 @@ def resolve_snapshot_id(
     - both selectors set -> :class:`AsOfConflictError` (API maps to 400).
     - ``as_of_snapshot_id`` -> that id, validated to exist (else :class:`SnapshotNotFoundError`).
     - ``as_of_timestamp`` -> the newest snapshot with ``timestamp_ms <= as_of`` (else
-      :class:`SnapshotNotFoundError`). Snapshot-id reads are the primary, deterministic path;
-      timestamp resolution is the convenience layer on top.
+      :class:`SnapshotNotFoundError`); ties at the same millisecond resolve to the newest
+      commit by sequence number (matching pyiceberg's own ``snapshot_as_of_timestamp``).
+      Snapshot-id reads are the primary, deterministic path; timestamp resolution is the
+      convenience layer on top.
     - neither -> ``None`` (read the current snapshot — the scan default).
     """
     if as_of_snapshot_id is not None and as_of_timestamp is not None:
@@ -166,7 +168,15 @@ def resolve_snapshot_id(
             raise SnapshotNotFoundError(
                 f"no snapshot at or before {_to_utc(as_of_timestamp).isoformat()}"
             )
-        return max(candidates, key=lambda s: s.timestamp_ms).snapshot_id
+        # Tie-break equal timestamps by sequence number so fast same-millisecond appends
+        # resolve to the newest commit. pyiceberg types sequence_number as int | None; fall
+        # back to -1 when it is missing/None so a snapshot with a real sequence wins the tie
+        # (degrading at worst to metadata order if every candidate lacks one).
+        def _seq(s) -> int:
+            seq = getattr(s, "sequence_number", None)
+            return seq if seq is not None else -1
+
+        return max(candidates, key=lambda s: (s.timestamp_ms, _seq(s))).snapshot_id
     return None
 
 

@@ -3,6 +3,7 @@
 ``rtdp info``    prints the resolved configuration.
 ``rtdp ingest``  runs one ingestion batch into the bronze Iceberg table.
 ``rtdp demo``    Iceberg capability demos (Phase 3).
+``rtdp serve``   starts the read-only FastAPI serving layer (Stage 2A).
 """
 
 from __future__ import annotations
@@ -86,6 +87,20 @@ def _demo(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _serve(settings: Settings) -> int:
+    import uvicorn
+
+    from .api import create_app
+
+    app = create_app(settings)
+    print(
+        f"Serving rtdp read-only API on http://{settings.api_host}:{settings.api_port}  "
+        f"(OpenAPI docs at /docs). Read path only — no ingestion."
+    )
+    uvicorn.run(app, host=settings.api_host, port=settings.api_port)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rtdp", description="Stage 1 Iceberg lakehouse CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -115,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
         ],
     )
 
+    sub.add_parser("serve", help="Start the read-only FastAPI serving layer (Stage 2A)")
+
     args = parser.parse_args(argv)
     settings = Settings()
 
@@ -124,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
         return _ingest(settings, args)
     if args.command == "demo":
         return _demo(settings, args)
+    if args.command == "serve":
+        return _serve(settings)
 
     parser.print_help()
     return 1

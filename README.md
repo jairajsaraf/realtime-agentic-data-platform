@@ -170,6 +170,66 @@ uv run rtdp demo reset                # purge ONLY the demo table
 
 Covered by `tests/test_demos.py` (`file://`) and `tests/test_demos_localstack.py` (LocalStack S3).
 
+## Serving layer (Stage 2A — read-only HTTP API)
+
+A FastAPI service exposes typed, queryable reads over the bronze table — flight filters,
+geographic bounding-box, interval aggregations, and Iceberg snapshot/time-travel — behind an
+auto-generated OpenAPI schema. It is **read-only**: ingestion stays the Stage 1 CLI path.
+All read logic lives in `rtdp.query` (transport-agnostic); the API (`rtdp.api`) is a thin
+layer over it, so the CLI and a future Stage D agent can reuse the same functions.
+
+**Why predicate pushdown?** `icao24`/`callsign`/time-window filters are translated into a
+pyiceberg `row_filter` and pushed into the scan, so the `day(event_time)` partition pruning
+fires at the table-format level instead of materializing the whole table and filtering in
+DuckDB. DuckDB is reserved for the SQL-shaped work (bounding-box, `GROUP BY` aggregations,
+ordered `LIMIT`/`OFFSET` paging). See the note in `src/rtdp/query.py`.
+
+### Run it
+
+```bash
+uv sync                                            # installs fastapi + uvicorn (in uv.lock)
+docker compose up -d                               # LocalStack S3 (primary)
+#   …or skip Docker:  export RTDP_STORAGE_BACKEND=file  (PowerShell: $env:...="file")
+uv run rtdp ingest --source synthetic --rows 50    # seed some data first
+uv run rtdp serve                                  # http://127.0.0.1:8000
+```
+
+Override the bind address with `RTDP_API_HOST` / `RTDP_API_PORT`. Interactive OpenAPI docs
+render at **http://127.0.0.1:8000/docs**.
+
+### Endpoints
+
+| Method & path | Purpose |
+|---|---|
+| `GET /health` | catalog/table reachability (200 healthy, 503 unavailable) |
+| `GET /flights` | filter by `icao24`, `callsign`, `start`, `end`; `limit`/`offset` |
+| `GET /flights/bbox` | bounding-box (`min_lat,max_lat,min_lon,max_lon`) + optional time window |
+| `GET /stats/flights-per-interval` | counts per `hour`\|`day`, optional `group_by=origin_country` |
+| `GET /snapshots` | list Iceberg snapshots from table metadata |
+| `GET /meta` | table identifier, snapshot pointer/count, schema, partition spec |
+
+Every read/aggregation endpoint accepts mutually-exclusive time-travel selectors
+`as_of_snapshot_id` and `as_of_timestamp` (supplying both → HTTP 400; a timestamp before the
+first snapshot → 404) and echoes the resolved `snapshot_id`. In `/flights` and `/flights/bbox`,
+`count` is the number of items **returned** (after `limit`/`offset`), not the total matches.
+
+### curl examples
+
+```bash
+curl 'http://127.0.0.1:8000/health'
+curl 'http://127.0.0.1:8000/flights?callsign=DLH123&limit=5'
+curl 'http://127.0.0.1:8000/flights?start=2026-06-14T00:00:00Z&end=2026-06-15T00:00:00Z&limit=5'
+curl 'http://127.0.0.1:8000/flights/bbox?min_lat=45&max_lat=55&min_lon=5&max_lon=15&limit=10'
+curl 'http://127.0.0.1:8000/stats/flights-per-interval?interval=day&group_by=origin_country'
+curl 'http://127.0.0.1:8000/snapshots'
+curl 'http://127.0.0.1:8000/meta'
+# time-travel: read an older snapshot (id from /snapshots)
+curl 'http://127.0.0.1:8000/flights?as_of_snapshot_id=<snapshot-id>&limit=5'
+```
+
+**Limitations (local-first):** no auth, rate-limiting, or caching yet, and no write path
+through the API. Stage D (agent integration over this API) is intentionally deferred.
+
 ## Tests
 
 ```bash

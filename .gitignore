@@ -25,7 +25,6 @@ _demo/
 .DS_Store
 Thumbs.db
 
-# Local agent session + planning docs (not part of the public deliverable)
-.claude/
+# Local planning docs (not part of the public deliverable)
 STAGE2A_SPEC.md
 SESSION_HANDOFF.md

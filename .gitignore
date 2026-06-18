@@ -14,6 +14,7 @@ build/
 
 # Local state (catalog db, warehouse data, localstack volume)
 _warehouse/
+_demo/
 .localstack/
 *.db
 
@@ -23,3 +24,8 @@ _warehouse/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local agent session + planning docs (not part of the public deliverable)
+.claude/
+STAGE2A_SPEC.md
+SESSION_HANDOFF.md

@@ -93,7 +93,7 @@ This path is a dev/CI convenience — **not** the target architecture.
 ## C. Tests & lint (no Docker)
 
 ```powershell
-uv run pytest -m "not localstack"     # -> 71 passed, 4 deselected
+uv run pytest -m "not localstack"     # -> 77 passed, 4 deselected
 uv run ruff check .                    # -> All checks passed!
 ```
 
@@ -159,7 +159,7 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
 - [ ] Schema-evolution demo works (add nullable column; old vs new snapshot)
 - [ ] Partition-evolution demo works **without rewriting** existing data
 - [ ] Time-travel / snapshot demo works
-- [ ] `pytest -m "not localstack"` (71) and `-m localstack` (4) pass; `ruff` clean
+- [ ] `pytest -m "not localstack"` (77) and `-m localstack` (4) pass; `ruff` clean
 - [ ] Real AWS S3 is a config-only swap (`RTDP_STORAGE_BACKEND=aws`)
 - [ ] `file://` fallback runs everything without Docker
 - [ ] `rtdp serve` starts the read-only API; `/docs` renders OpenAPI for all six endpoints

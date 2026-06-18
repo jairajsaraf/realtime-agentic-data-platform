@@ -1,5 +1,7 @@
 # Real-time agentic data platform
 
+[![codecov](https://codecov.io/github/jairajsaraf/realtime-agentic-data-platform/graph/badge.svg?token=PX1S7LTMYW)](https://codecov.io/github/jairajsaraf/realtime-agentic-data-platform)
+
 A locally reproducible data platform built **stage by stage**. Today it pairs an
 [Apache Iceberg](https://iceberg.apache.org/) lakehouse (**Stage 1**) with a
 read-only FastAPI serving layer over it (**Stage 2A**).

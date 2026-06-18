@@ -25,7 +25,12 @@ jobs:
       - name: Lint
         run: uv run ruff check .
       - name: Unit tests
-        run: uv run pytest -m "not localstack" --cov=rtdp --cov-report=term-missing
+        run: uv run pytest -m "not localstack" --cov=rtdp --cov-branch --cov-report=term-missing --cov-report=xml
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
 
   integration-localstack:
     name: integration tests (LocalStack S3)

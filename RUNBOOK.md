@@ -138,7 +138,11 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
 - The committed/CI data path is **synthetic** (OpenSky-shaped). Real OpenSky is **opt-in**
   (`--source opensky-live`), network-gated, never run in CI, never committed.
 - LocalStack S3 is **ephemeral** — `docker compose down` discards it; re-run ingestion to repopulate.
-  The SQLite catalog pointer lives in `_warehouse\catalog.db` (gitignored).
+  The SQLite catalog pointer lives in `_warehouse\catalog.db` (gitignored). **Gotcha:** if you
+  tear LocalStack down and bring it back up without clearing local state, the stale catalog points
+  at S3 metadata that no longer exists and the next run fails with `FileNotFoundError`. Run
+  `make reset` (or `Remove-Item -Recurse -Force _warehouse, _demo, .localstack`) after a teardown,
+  before re-ingesting. Fresh clones and CI are unaffected.
 - Partition evolution day→hour is a **replace** (pyiceberg rejects two partition fields on one
   source column); existing data is still not rewritten.
 - pyiceberg cannot compact / rewrite data files (out of scope for Stage 1).

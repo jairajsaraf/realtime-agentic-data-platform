@@ -18,9 +18,8 @@ ingestion-time data-quality checks — not a generic CSV-to-Parquet batch job.
 | **Storage** | **LocalStack S3 (primary)**; `file://` is a dev/CI convenience only | Free local S3 emulation; real AWS is a config-only swap. `file://` runs the demos without Docker but is **not** the target architecture. |
 | **DQ** | Pandera (warn/fail) | Lightweight, schema-first validation. |
 
-A fuller engine trade-off table (vs PySpark + Iceberg) is in
-[`docs/`](#) — summarized: PySpark is more feature-complete but needs a JVM +
-winutils on Windows and heavy CI, which conflicts with the
+The main alternative considered was **PySpark + Iceberg**: more feature-complete,
+but it needs a JVM + winutils on Windows and heavy CI, which conflicts with the
 fresh-clone-reproducibility and lightweight-CI constraints. The only pyiceberg
 gap (data-file compaction) is out of Stage-1 scope.
 

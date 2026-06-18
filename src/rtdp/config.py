@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     )
     opensky_states_url: str = "https://opensky-network.org/api/states/all"
 
+    # --- read/serving API (Stage 2A) ---
+    api_host: str = "127.0.0.1"
+    api_port: int = 8000
+    api_default_limit: int = 100
+    api_max_limit: int = 1000
+
     # --- derived values ---
     @property
     def warehouse_location(self) -> str:

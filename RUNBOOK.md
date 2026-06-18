@@ -72,7 +72,7 @@ Success: prints `metadata.json`, `.avro`, `.parquet` counts > 0 and `event_day=.
 ```powershell
 uv run pytest -m localstack
 ```
-Success: `3 passed` (bucket round-trip, bronze ingest, demo on S3).
+Success: `4 passed` (bucket round-trip, bronze ingest, demo on S3, read API over S3).
 
 ---
 
@@ -93,13 +93,43 @@ This path is a dev/CI convenience — **not** the target architecture.
 ## C. Tests & lint (no Docker)
 
 ```powershell
-uv run pytest -m "not localstack"     # -> 34 passed, 3 deselected
+uv run pytest -m "not localstack"     # -> 71 passed, 4 deselected
 uv run ruff check .                    # -> All checks passed!
 ```
 
 ---
 
-## D. Live OpenSky (optional — real public data, NOT run in CI)
+## D. Serving layer (Stage 2A — read-only API)
+
+Start the FastAPI read API over whichever backend is configured (LocalStack S3 by default,
+`file://` if `RTDP_STORAGE_BACKEND=file`). **Ingest some data first** — the API is read-only
+and does not create or mutate tables.
+
+```powershell
+uv run rtdp ingest --source synthetic --rows 50   # seed the bronze table
+uv run rtdp serve                                  # http://127.0.0.1:8000
+```
+Success: `Uvicorn running on http://127.0.0.1:8000`. Override the bind with
+`$env:RTDP_API_HOST` / `$env:RTDP_API_PORT`. Stop with `Ctrl+C`.
+
+Open the interactive OpenAPI docs at **http://127.0.0.1:8000/docs**, or curl the endpoints
+(from another shell):
+
+```powershell
+curl.exe "http://127.0.0.1:8000/health"
+curl.exe "http://127.0.0.1:8000/flights?callsign=DLH123&limit=5"
+curl.exe "http://127.0.0.1:8000/flights/bbox?min_lat=45&max_lat=55&min_lon=5&max_lon=15&limit=10"
+curl.exe "http://127.0.0.1:8000/stats/flights-per-interval?interval=day&group_by=origin_country"
+curl.exe "http://127.0.0.1:8000/snapshots"
+curl.exe "http://127.0.0.1:8000/meta"
+```
+`/health` returns 200 when the catalog/table are reachable, 503 otherwise. Every read endpoint
+accepts `as_of_snapshot_id` / `as_of_timestamp` (mutually exclusive → 400) for time-travel and
+echoes the resolved `snapshot_id`. Read-only and local-first: no auth/rate-limiting/caching.
+
+---
+
+## E. Live OpenSky (optional — real public data, NOT run in CI)
 
 ```powershell
 uv run rtdp ingest --source opensky-live
@@ -110,7 +140,7 @@ Opt-in and network-gated; hits the real OpenSky API. Anonymous tier works for a 
 
 ---
 
-## E. Cleanup
+## F. Cleanup
 
 ```powershell
 docker compose down                   # stop + remove LocalStack (its S3 data is ephemeral)
@@ -129,9 +159,10 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
 - [ ] Schema-evolution demo works (add nullable column; old vs new snapshot)
 - [ ] Partition-evolution demo works **without rewriting** existing data
 - [ ] Time-travel / snapshot demo works
-- [ ] `pytest -m "not localstack"` (34) and `-m localstack` (3) pass; `ruff` clean
+- [ ] `pytest -m "not localstack"` (71) and `-m localstack` (4) pass; `ruff` clean
 - [ ] Real AWS S3 is a config-only swap (`RTDP_STORAGE_BACKEND=aws`)
 - [ ] `file://` fallback runs everything without Docker
+- [ ] `rtdp serve` starts the read-only API; `/docs` renders OpenAPI for all six endpoints
 
 ## Known limitations (Stage 1)
 

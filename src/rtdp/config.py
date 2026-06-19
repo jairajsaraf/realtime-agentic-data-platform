@@ -83,7 +83,8 @@ class Settings(BaseSettings):
     agent_api_key: str | None = None  # bearer token for the LLM endpoint — secret, never committed
     agent_model: str | None = None  # model name, e.g. "meta/llama-3.1-8b-instruct"
     agent_timeout_seconds: float = 60.0  # per LLM HTTP call
-    agent_max_turns: int = 6  # tool-call budget per question (loop guard)
+    agent_max_turns: int = 6  # model-turn budget per question (LLM round-trips)
+    agent_max_tool_calls: int = 12  # total tool executions per question (caps multi-call fan-out)
     agent_temperature: float = 0.0  # near-deterministic generation
     agent_max_rows: int = 1000  # row cap the agent requests for DQ sampling (<= api_max_limit)
 

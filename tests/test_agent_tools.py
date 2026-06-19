@@ -111,6 +111,41 @@ def test_execute_endpoint_preserves_snapshot_provenance():
     assert result.data["items"][0]["icao24"] == "abc"
 
 
+def test_execute_health_uses_current_snapshot_id_for_provenance():
+    # /health returns current_snapshot_id (not snapshot_id); provenance must still be captured.
+    def handler(request):
+        return httpx.Response(200, json={"status": "ok", "current_snapshot_id": 99})
+
+    executor = ApiToolExecutor("http://test", _client(handler), static_registry())
+    result = executor.execute("health", {})
+    assert result.ok is True
+    assert result.snapshot_id == 99
+
+
+def test_execute_meta_uses_current_snapshot_id_for_provenance():
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={"table_identifier": "bronze.x", "current_snapshot_id": 7, "snapshot_count": 3},
+        )
+
+    executor = ApiToolExecutor("http://test", _client(handler), static_registry())
+    result = executor.execute("meta", {})
+    assert result.ok is True
+    assert result.snapshot_id == 7
+
+
+def test_execute_prefers_snapshot_id_over_current_when_both_present():
+    def handler(request):
+        return httpx.Response(
+            200, json={"snapshot_id": 42, "current_snapshot_id": 1, "count": 0, "items": []}
+        )
+
+    executor = ApiToolExecutor("http://test", _client(handler), static_registry())
+    result = executor.execute("flights", {})
+    assert result.snapshot_id == 42  # flights/stats snapshot_id wins over current_snapshot_id
+
+
 def test_execute_coerces_argument_types():
     seen: dict = {}
 

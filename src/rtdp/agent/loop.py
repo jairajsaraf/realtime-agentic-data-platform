@@ -4,7 +4,9 @@ Pure orchestration. The loop depends only on an injected :class:`~rtdp.agent.llm
 executor exposing ``execute(name, arguments) -> ToolResult``, so tests drive it with a fake LLM and
 a fake/mock executor — no network. Provenance (endpoint + snapshot id per tool call) is collected
 from the tool results themselves, so an answer's citations are guaranteed regardless of what the
-model writes. A turn budget (``max_turns``) bounds the loop so it can never run forever.
+model writes. Two independent budgets bound the loop: ``max_turns`` caps model round-trips, and
+``max_tool_calls`` caps total tool executions per question — so even a single model response that
+emits many tool calls cannot exceed the configured tool-call budget.
 """
 
 from __future__ import annotations
@@ -54,16 +56,23 @@ def run_agent(
     executor,
     tools: list[dict],
     max_turns: int = 6,
+    max_tool_calls: int | None = None,
     system_prompt: str = SYSTEM_PROMPT,
     on_event: Callable[[str, object], None] | None = None,
 ) -> AgentResult:
-    """Run the tool-calling loop until the model returns a final answer or the budget is spent."""
+    """Run the tool-calling loop until the model gives a final answer or a budget is spent.
+
+    ``max_turns`` caps model round-trips; ``max_tool_calls`` (when set) caps total tool
+    executions across the whole question, enforced per individual call so a single multi-call
+    response cannot overshoot it.
+    """
     messages: list[ChatMessage] = [
         ChatMessage("system", system_prompt),
         ChatMessage("user", question),
     ]
     provenance: list[Provenance] = []
     turns = 0
+    tool_calls_made = 0
     total_tokens = 0
     saw_usage = False
     for turn in range(1, max_turns + 1):
@@ -84,9 +93,20 @@ def run_agent(
             ChatMessage("assistant", response.content, tool_calls=response.tool_calls)
         )
         for call in response.tool_calls:
+            if max_tool_calls is not None and tool_calls_made >= max_tool_calls:
+                # Budget reached mid-response: stop before executing any further tool calls.
+                return AgentResult(
+                    answer="Stopped: reached the per-question tool-call budget.",
+                    provenance=provenance,
+                    turns=turns,
+                    complete=False,
+                    error="max_tool_calls exhausted",
+                    tokens=total_tokens if saw_usage else None,
+                )
             if on_event is not None:
                 on_event("tool_call", call)
             result = executor.execute(call.name, call.arguments)
+            tool_calls_made += 1
             provenance.append(Provenance(result.endpoint, result.snapshot_id))
             messages.append(
                 ChatMessage("tool", result.to_content(), tool_call_id=call.id, name=call.name)

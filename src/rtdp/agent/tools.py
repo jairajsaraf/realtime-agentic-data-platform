@@ -260,6 +260,15 @@ def _http_error(status: int, data: Any) -> str:
     return f"HTTP {status}" + (f": {detail}" if detail else "")
 
 
+def _extract_snapshot_id(data: Any) -> int | None:
+    """Snapshot provenance from a response: ``snapshot_id`` (flights/stats) or
+    ``current_snapshot_id`` (health/meta)."""
+    if not isinstance(data, dict):
+        return None
+    value = data.get("snapshot_id")
+    return value if value is not None else data.get("current_snapshot_id")
+
+
 def _coerce(value: Any, json_type: str) -> Any:
     if json_type == "integer":
         return int(value)
@@ -339,7 +348,7 @@ class ApiToolExecutor:
         except Exception as exc:  # surface transport errors to the model/CLI
             return ToolResult(tool.name, endpoint, params, ok=False, error=f"request failed: {exc}")
         ok = 200 <= status < 300
-        snapshot_id = data.get("snapshot_id") if isinstance(data, dict) else None
+        snapshot_id = _extract_snapshot_id(data)
         return ToolResult(
             tool.name, endpoint, params, ok=ok, status_code=status, snapshot_id=snapshot_id,
             data=data if ok else None, error=None if ok else _http_error(status, data),
@@ -364,7 +373,7 @@ class ApiToolExecutor:
                 error=_http_error(status, data),
             )
         rows = data.get("items", [])
-        snapshot_id = data.get("snapshot_id")
+        snapshot_id = _extract_snapshot_id(data)
         diagnosis = dq.diagnose(
             rows, snapshot_id=snapshot_id, endpoint=f"GET {_FLIGHTS_PATH}",
             returned=data.get("count", len(rows)), requested_limit=flight_params["limit"],

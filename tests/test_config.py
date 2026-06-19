@@ -72,6 +72,7 @@ def test_agent_defaults_unset_so_fake_tests_need_no_config():
     assert s.agent_model is None
     assert s.agent_api_key is None
     assert s.agent_max_turns == 6
+    assert s.agent_max_tool_calls == 12
     assert s.agent_max_rows == 1000
 
 
@@ -80,11 +81,13 @@ def test_agent_settings_from_env(monkeypatch):
     monkeypatch.setenv("RTDP_AGENT_MODEL", "m1")
     monkeypatch.setenv("RTDP_AGENT_API_KEY", "secret")
     monkeypatch.setenv("RTDP_AGENT_MAX_TURNS", "9")
+    monkeypatch.setenv("RTDP_AGENT_MAX_TOOL_CALLS", "4")
     s = _settings()
     assert s.agent_base_url == "http://llm.test/v1"
     assert s.agent_model == "m1"
     assert s.agent_api_key == "secret"
     assert s.agent_max_turns == 9
+    assert s.agent_max_tool_calls == 4
 
 
 def test_agent_api_base_url_default_and_override():

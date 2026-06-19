@@ -95,7 +95,7 @@ This path is a dev/CI convenience — **not** the target architecture.
 ## C. Tests & lint (no Docker)
 
 ```powershell
-uv run pytest -m "not localstack"     # -> 139 passed, 5 deselected
+uv run pytest -m "not localstack"     # -> 144 passed, 5 deselected
 uv run ruff check .                    # -> All checks passed!
 ```
 
@@ -192,7 +192,8 @@ $env:RTDP_AGENT_MODEL    = "meta/llama-3.1-8b-instruct"
 $env:RTDP_AGENT_API_KEY  = "<your key>"
 # Swap to a frontier provider by changing these three vars only. Optional:
 #   $env:RTDP_AGENT_API_URL (read API base, default http://127.0.0.1:8000)
-#   $env:RTDP_AGENT_MAX_TURNS, $env:RTDP_AGENT_TIMEOUT_SECONDS
+#   $env:RTDP_AGENT_MAX_TURNS (model round-trips), $env:RTDP_AGENT_MAX_TOOL_CALLS (tool budget)
+#   $env:RTDP_AGENT_TIMEOUT_SECONDS
 ```
 
 ### 3. Ask (one-shot) or run interactively (from a second shell)
@@ -250,7 +251,7 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
 - [ ] Schema-evolution demo works (add nullable column; old vs new snapshot)
 - [ ] Partition-evolution demo works **without rewriting** existing data
 - [ ] Time-travel / snapshot demo works
-- [ ] `pytest -m "not localstack"` (139) and `-m localstack` (5) pass; `ruff` clean
+- [ ] `pytest -m "not localstack"` (144) and `-m localstack` (5) pass; `ruff` clean
 - [ ] Real AWS S3 is a config-only swap (`RTDP_STORAGE_BACKEND=aws`)
 - [ ] `file://` fallback runs everything without Docker
 - [ ] `rtdp serve` starts the read-only API; `/docs` renders OpenAPI for all six endpoints

@@ -74,6 +74,7 @@ def answer_question(
             executor=executor,
             tools=registry.definitions(),
             max_turns=settings.agent_max_turns,
+            max_tool_calls=settings.agent_max_tool_calls,
         )
     finally:
         if own_client:

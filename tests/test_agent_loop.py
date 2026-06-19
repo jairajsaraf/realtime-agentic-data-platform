@@ -106,6 +106,46 @@ def test_max_turns_guard_returns_incomplete():
     assert len(executor.calls) == 3
 
 
+def test_tool_call_budget_caps_executions_within_one_response():
+    # One assistant message emits 3 tool calls; the budget of 2 must stop the 3rd from executing.
+    script = [
+        ChatResponse(
+            tool_calls=[
+                ToolCall("c1", "flights", {"icao24": "a"}),
+                ToolCall("c2", "flights", {"icao24": "b"}),
+                ToolCall("c3", "flights", {"icao24": "c"}),
+            ]
+        ),
+    ]
+    executor = _FakeExecutor(
+        {"flights": ToolResult("flights", "GET /flights", {}, ok=True, snapshot_id=1, data={})}
+    )
+    result = _run("q", FakeLLMClient(script), executor, max_tool_calls=2)
+
+    assert result.complete is False
+    assert result.error == "max_tool_calls exhausted"
+    assert len(executor.calls) == 2  # only the first two of three executed
+
+
+def test_multiple_tool_calls_in_one_response_within_budget_all_execute():
+    script = [
+        ChatResponse(
+            tool_calls=[
+                ToolCall("c1", "flights", {"icao24": "a"}),
+                ToolCall("c2", "flights", {"icao24": "b"}),
+            ]
+        ),
+        ChatResponse(content="done"),
+    ]
+    executor = _FakeExecutor(
+        {"flights": ToolResult("flights", "GET /flights", {}, ok=True, snapshot_id=42, data={})}
+    )
+    result = _run("q", FakeLLMClient(script), executor, max_tool_calls=5)
+
+    assert result.complete is True
+    assert len(executor.calls) == 2  # both fit under the budget
+
+
 def test_citation_line_dedupes_repeated_sources():
     script = [
         ChatResponse(

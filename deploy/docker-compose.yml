@@ -1,0 +1,100 @@
+# Stage E — single-host deployed topology (one image, multiple entrypoints).
+#
+# Run from the repo root, e.g.:
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# Default `up` runs the read API + the micro-batch stream loop on the file:// backend,
+# sharing one volume (the SQLite catalog + warehouse live on the same filesystem, as the
+# catalog is single-writer SQLite). This is runnable today with no secrets.
+#
+# Two gated scaffolds are intentionally NOT wired yet and stay behind opt-in profiles:
+#   * profile "s3"  — MinIO object storage. Pointing rtdp at MinIO via the `aws` backend
+#                     needs the custom-S3-endpoint change in config.py (Stage E plan, Risk
+#                     R1) — that change is approval-gated, so MinIO is defined but unused.
+#   * (observability) — the OTel collector / Datadog Agent is added in Stage E phase E2
+#                     (needs the optional [otel] extra + a Datadog key) — also gated.
+
+x-rtdp-image: &rtdp-image
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  image: rtdp:local
+
+x-rtdp-file-env: &rtdp-file-env
+  RTDP_STORAGE_BACKEND: file
+  RTDP_LOCAL_WAREHOUSE_DIR: /data/warehouse
+  RTDP_CATALOG_DB_PATH: /data/warehouse/catalog.db
+
+services:
+  # Public read API (the only externally exposed service).
+  api:
+    <<: *rtdp-image
+    command: ["serve"]
+    environment:
+      <<: *rtdp-file-env
+      RTDP_API_HOST: "0.0.0.0"
+      RTDP_API_PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - rtdp-state:/data
+    restart: unless-stopped
+    healthcheck:
+      # /health returns 503 until a table exists, 200 once the catalog/table load.
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # The sole writer: appends one micro-batch snapshot per interval (synthetic source).
+  stream:
+    <<: *rtdp-image
+    command: ["stream", "--source", "synthetic"]
+    environment:
+      <<: *rtdp-file-env
+      RTDP_STREAM_INTERVAL_SECONDS: "60"
+    volumes:
+      - rtdp-state:/data
+    restart: unless-stopped
+    stop_signal: SIGINT          # the stream loop traps SIGINT only (plan Risk R3)
+    depends_on:
+      - api
+
+  # One-shot snapshot maintenance (metadata-only). Run on demand or from a host timer:
+  #   docker compose -f deploy/docker-compose.yml run --rm maintain
+  # Schedule so it does not overlap a stream commit (single-writer SQLite, plan Risk R2).
+  maintain:
+    <<: *rtdp-image
+    command: ["maintain", "expire-snapshots"]
+    environment:
+      <<: *rtdp-file-env
+    volumes:
+      - rtdp-state:/data
+    profiles: ["maintain"]
+    restart: "no"
+
+  # --- gated scaffold: object storage (not active by default) ---
+  # Activating the S3 path also requires the config.py custom-endpoint change (Risk R1, gated).
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      # No secrets are committed: these must be supplied (e.g. via Doppler / a local .env).
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER (e.g. via Doppler or a local .env)}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD (e.g. via Doppler or a local .env)}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    profiles: ["s3"]
+    restart: unless-stopped
+
+volumes:
+  rtdp-state:
+  minio-data:

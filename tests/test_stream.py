@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from rtdp import query
 from rtdp.sources.base import PrefetchedSource, RawBatch
-from rtdp.sources.synthetic import ContinuousSyntheticSource
-from rtdp.stream import run_stream
+from rtdp.sources.synthetic import ContinuousSyntheticSource, SyntheticSource
+from rtdp.stream import BatchDQAbort, run_stream
 from rtdp.transforms import dedupe_raw_records
 
 
@@ -83,6 +83,22 @@ class _FlakySource:
         return self._inner.fetch()
 
 
+class _DQFailSource:
+    """Always yields a batch carrying FAIL-level DQ rows (null icao24, bad coords).
+
+    ``run_ingest`` aborts such a batch by returning ``rows_written=0`` WITHOUT raising, so the
+    loop must treat the tick as a per-batch failure — not a successful append.
+    """
+
+    name = "dq_fail"
+
+    def __init__(self) -> None:
+        self._inner = SyntheticSource(n_rows=2, inject_warnings=False, inject_failures=True)
+
+    def fetch(self) -> RawBatch:
+        return self._inner.fetch()
+
+
 def test_run_stream_appends_n_micro_batches(file_settings):
     src = ContinuousSyntheticSource(fleet_size=3, seed=1, dup_count=1)
     results = run_stream(file_settings, src, interval_seconds=0, max_batches=3, sleep=_no_sleep)
@@ -143,3 +159,41 @@ def test_run_stream_keyboardinterrupt_returns_partial_results(file_settings):
     # batch 0 appends, then the first sleep raises KeyboardInterrupt -> graceful stop.
     results = run_stream(file_settings, src, interval_seconds=1, max_batches=5, sleep=_interrupt)
     assert len(results) == 1
+
+
+def test_run_stream_dq_aborted_batch_is_not_counted_as_append(file_settings):
+    """A FAIL-DQ tick: not in results, no on_batch, routed to on_error; max_batches=1 exits."""
+    batches: list[int] = []
+    errors: list[tuple[int, Exception]] = []
+    results = run_stream(
+        file_settings,
+        _DQFailSource(),
+        interval_seconds=0,
+        max_batches=1,
+        sleep=_no_sleep,
+        on_batch=lambda i, r: batches.append(i),
+        on_error=lambda i, exc: errors.append((i, exc)),
+    )
+    assert results == []  # (1) DQ-aborted batch is not an append
+    assert batches == []  # (2) on_batch never fired for it
+    assert [i for i, _ in errors] == [0]  # (3) routed through the error path
+    assert isinstance(errors[0][1], BatchDQAbort)
+    # (4) max_batches=1 exited cleanly; nothing was written, so the table was never created.
+    assert query.health(file_settings).table_loadable is False
+
+
+def test_run_stream_dq_aborts_apply_backoff_and_respect_max_batches(file_settings):
+    """Consecutive DQ aborts back off like transient errors and never make the loop infinite."""
+    delays: list[float] = []
+    results = run_stream(
+        file_settings,
+        _DQFailSource(),
+        interval_seconds=1,
+        max_batches=3,
+        sleep=lambda s: delays.append(s),
+        on_error=lambda i, exc: None,
+    )
+    assert results == []
+    # max_batches caps attempted ticks (3), even though every tick DQ-fails. Sleep is skipped
+    # after the final tick, so 2 backoff delays grow as 1*2^1, 1*2^2 (same path as errors).
+    assert delays == [2, 4]

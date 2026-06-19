@@ -1,7 +1,8 @@
-# Stage 1 Runbook — fresh clone (Windows PowerShell)
+# Runbook — fresh clone (Windows PowerShell)
 
-Step-by-step for a new developer bringing the Iceberg lakehouse up from a fresh clone.
-The **primary path is LocalStack S3**; a **`file://` fallback** runs everything without Docker.
+Step-by-step for a new developer bringing the platform up from a fresh clone (Stages 1, 2A, 2B,
+and the Stage D agent). The **primary path is LocalStack S3**; a **`file://` fallback** runs
+everything without Docker.
 
 ## Prerequisites
 
@@ -94,7 +95,7 @@ This path is a dev/CI convenience — **not** the target architecture.
 ## C. Tests & lint (no Docker)
 
 ```powershell
-uv run pytest -m "not localstack"     # -> 97 passed, 5 deselected
+uv run pytest -m "not localstack"     # -> 144 passed, 5 deselected
 uv run ruff check .                    # -> All checks passed!
 ```
 
@@ -168,7 +169,70 @@ Opt-in and network-gated; hits the real OpenSky API. Anonymous tier works for a 
 
 ---
 
-## G. Cleanup
+## G. Agent (Stage D — natural-language agent over the read API)
+
+The agent calls the **running Stage 2A API over HTTP** as its tools. Start the API first
+(section D), then point the agent at a model endpoint. The agent is **read-only and
+human-in-the-loop**: it proposes remediations but never mutates data, runs ingestion, or expires
+snapshots.
+
+### 1. Start the read-only API (the agent's tool surface)
+
+```powershell
+uv run rtdp ingest --source synthetic --rows 80   # seed data (includes WARN rows for DQ)
+uv run rtdp serve                                  # http://127.0.0.1:8000  (leave running)
+```
+
+### 2. Configure a model endpoint (open dev model or frontier — config only)
+
+```powershell
+# Example: an OpenAI-compatible open-model endpoint (NVIDIA NIM). No keys are committed.
+$env:RTDP_AGENT_BASE_URL = "https://integrate.api.nvidia.com/v1"
+$env:RTDP_AGENT_MODEL    = "meta/llama-3.1-8b-instruct"
+$env:RTDP_AGENT_API_KEY  = "<your key>"
+# Swap to a frontier provider by changing these three vars only. Optional:
+#   $env:RTDP_AGENT_API_URL (read API base, default http://127.0.0.1:8000)
+#   $env:RTDP_AGENT_MAX_TURNS (model round-trips), $env:RTDP_AGENT_MAX_TOOL_CALLS (tool budget)
+#   $env:RTDP_AGENT_TIMEOUT_SECONDS
+```
+
+### 3. Ask (one-shot) or run interactively (from a second shell)
+
+```powershell
+uv run rtdp agent "How many records are there, and which snapshot answered?"
+uv run rtdp agent "Are there any data-quality issues? Propose fixes."
+uv run rtdp agent --interactive          # REPL; type 'quit' to exit
+uv run rtdp agent "..." --json           # machine-readable: answer + provenance + tokens
+```
+Success: an answer followed by a `Sources: <endpoint> @ snapshot <id>` line. Exit code `2` with a
+clear message if the API is unreachable (start `rtdp serve`) or no model is configured.
+
+**HITL data-quality workflow:** for DQ questions the agent calls a read-only `diagnose_data_quality`
+tool that re-derives anomalies (over-speed, unknown `position_source`, out-of-range
+coordinates/altitude, nulls, duplicate state keys) from the rows the API returns, and prints
+`PROPOSED (requires human approval; not applied): ...` remediations. **You** decide whether to act
+(e.g. adjust an ingest filter); the agent never applies anything. Diagnosis is a **bounded sample**
+(one queried window, capped by the API row limit, over the snapshots queried) and says so.
+
+### 4. Fake tests vs live eval
+
+- **Fake-LLM unit tests (CI; no network/keys):**
+  ```powershell
+  uv run pytest -m "not localstack" -k agent
+  ```
+  Drives the agent with a deterministic stub LLM — no model calls.
+- **Opt-in live eval (never in CI):** with the API running and the model vars set above —
+  ```powershell
+  uv run python scripts/eval_agent.py --report _agent_eval_report.json
+  ```
+  Runs a few cases and prints `PASS/FAIL` each with **grounding/faithfulness** (claims match cited
+  tool results + snapshot), **tool-call correctness** (right endpoint), **latency**, and **token
+  usage**; failures are listed explicitly. The JSON report path is git-ignored and contains no keys.
+  A non-zero exit means at least one case failed — read the failures, don't just trust a pass.
+
+---
+
+## H. Cleanup
 
 ```powershell
 docker compose down                   # stop + remove LocalStack (its S3 data is ephemeral)
@@ -187,12 +251,14 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
 - [ ] Schema-evolution demo works (add nullable column; old vs new snapshot)
 - [ ] Partition-evolution demo works **without rewriting** existing data
 - [ ] Time-travel / snapshot demo works
-- [ ] `pytest -m "not localstack"` (97) and `-m localstack` (5) pass; `ruff` clean
+- [ ] `pytest -m "not localstack"` (144) and `-m localstack` (5) pass; `ruff` clean
 - [ ] Real AWS S3 is a config-only swap (`RTDP_STORAGE_BACKEND=aws`)
 - [ ] `file://` fallback runs everything without Docker
 - [ ] `rtdp serve` starts the read-only API; `/docs` renders OpenAPI for all six endpoints
 - [ ] `rtdp stream` runs the scheduled micro-batch loop (within-batch dedup, skip-empty,
       read-time latest-state); `rtdp maintain expire-snapshots` bounds snapshot growth (metadata-only)
+- [ ] `rtdp agent "<q>"` answers via the read API with endpoint+snapshot citations; fake-LLM agent
+      tests are green with no network/keys; the live eval harness is opt-in (never in CI)
 
 ## Known limitations
 
@@ -212,6 +278,12 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
   **cannot compact / rewrite or delete data files** in this build. Data-file compaction is a
   true-engine (e.g. Spark) concern, intentionally **not faked** here — a direct consequence of the
   Stage 1 pyiceberg/no-JVM trade-off.
-- **Out of scope:** true streaming (Kafka/Flink), agents, orchestration, dashboards,
-  real AWS deployment, production IAM.
+- **Stage D agent:** consumes the read API only (no direct catalog/query/DuckDB access);
+  read-only and human-in-the-loop (proposes remediations, never applies them). DQ diagnosis is
+  re-derived from API responses — bounded by the queried window, the API row limit, and available
+  snapshots (Pandera WARN/FAIL history is not persisted). Live model calls are opt-in and
+  config-driven (`RTDP_AGENT_*`); unit tests use a deterministic fake LLM.
+- **Out of scope:** true streaming (Kafka/Flink), RAG/vector search, fine-tuning, autonomous
+  remediation (the Stage D agent proposes; a human applies), orchestration, dashboards, real AWS
+  deployment, production IAM.
 ```

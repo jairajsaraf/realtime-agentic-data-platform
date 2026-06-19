@@ -6,6 +6,7 @@
 ``rtdp serve``    starts the read-only FastAPI serving layer (Stage 2A).
 ``rtdp stream``   scheduled micro-batch ingestion (Stage 2B; near-real-time, not true streaming).
 ``rtdp maintain`` table maintenance, e.g. snapshot expiration (Stage 2B; metadata-only).
+``rtdp agent``    natural-language agent over the read API (Stage D; read-only, HITL).
 """
 
 from __future__ import annotations
@@ -170,6 +171,73 @@ def _maintain(settings: Settings, args: argparse.Namespace) -> int:
     return 1
 
 
+def _agent(settings: Settings, args: argparse.Namespace) -> int:
+    from .agent.runtime import answer_question, build_http_client, build_llm_client
+
+    overrides: dict = {}
+    if args.api_url is not None:
+        overrides["agent_api_url"] = args.api_url
+    if args.max_turns is not None:
+        overrides["agent_max_turns"] = args.max_turns
+    if overrides:
+        settings = settings.model_copy(update=overrides)
+
+    base_url = settings.agent_api_base_url
+    client = build_http_client(settings)
+    try:
+        try:
+            client.get(f"{base_url}/health")
+        except Exception as exc:  # noqa: BLE001 — any transport failure means the API is down
+            print(
+                f"Read API not reachable at {base_url}: {exc}\n"
+                "Start it first with `rtdp serve`.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            llm = build_llm_client(settings)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+
+        def _ask(question: str) -> None:
+            result = answer_question(settings, question, llm=llm, client=client)
+            if args.json:
+                import json
+
+                print(
+                    json.dumps(
+                        {
+                            "answer": result.answer,
+                            "provenance": [vars(p) for p in result.provenance],
+                            "complete": result.complete,
+                            "tokens": result.tokens,
+                        },
+                        default=str,
+                    )
+                )
+            else:
+                print(result.answer)
+                print(result.citation_line())
+
+        if args.interactive or not args.question:
+            print("rtdp agent — interactive mode. Ask a question, or type 'quit' to exit.")
+            while True:
+                try:
+                    question = input("agent> ").strip()
+                except EOFError:
+                    break
+                if question.lower() in ("quit", "exit"):
+                    break
+                if question:
+                    _ask(question)
+        else:
+            _ask(args.question)
+        return 0
+    finally:
+        client.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rtdp", description="Stage 1 Iceberg lakehouse CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -225,6 +293,24 @@ def main(argv: list[str] | None = None) -> int:
         "--retain", type=int, default=None, help="snapshots to keep (default from settings)"
     )
 
+    agent = sub.add_parser(
+        "agent",
+        help="Natural-language agent over the read API (Stage D; read-only, HITL)",
+    )
+    agent.add_argument(
+        "question", nargs="?", default=None, help="question to ask (omit for interactive mode)"
+    )
+    agent.add_argument("--interactive", "-i", action="store_true", help="interactive REPL mode")
+    agent.add_argument(
+        "--api-url", default=None, help="read API base URL (default: settings / local serve)"
+    )
+    agent.add_argument(
+        "--max-turns", type=int, default=None, help="tool-call budget per question"
+    )
+    agent.add_argument(
+        "--json", action="store_true", help="emit JSON (answer + provenance) instead of text"
+    )
+
     args = parser.parse_args(argv)
     settings = Settings()
 
@@ -240,6 +326,8 @@ def main(argv: list[str] | None = None) -> int:
         return _stream(settings, args)
     if args.command == "maintain":
         return _maintain(settings, args)
+    if args.command == "agent":
+        return _agent(settings, args)
 
     parser.print_help()
     return 1

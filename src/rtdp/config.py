@@ -73,6 +73,21 @@ class Settings(BaseSettings):
     stream_max_batches: int = 0  # 0 = run until interrupted
     expire_retain_last: int = 10  # default snapshots to keep for `rtdp maintain expire-snapshots`
 
+    # --- agentic layer (Stage D) ---
+    # The agent is an HTTP client of the Stage 2A read API; it never touches the catalog/query
+    # layer directly. `agent_api_url` is the base URL it calls (defaults to the local serve URL).
+    agent_api_url: str | None = None
+    # OpenAI-compatible LLM endpoint. Provider-agnostic and swappable by config; when unset, the
+    # live client is disabled (deterministic fake-LLM tests need none of these).
+    agent_base_url: str | None = None  # e.g. an NVIDIA NIM / OpenAI-compatible base URL
+    agent_api_key: str | None = None  # bearer token for the LLM endpoint — secret, never committed
+    agent_model: str | None = None  # model name, e.g. "meta/llama-3.1-8b-instruct"
+    agent_timeout_seconds: float = 60.0  # per LLM HTTP call
+    agent_max_turns: int = 6  # model-turn budget per question (LLM round-trips)
+    agent_max_tool_calls: int = 12  # total tool executions per question (caps multi-call fan-out)
+    agent_temperature: float = 0.0  # near-deterministic generation
+    agent_max_rows: int = 1000  # row cap the agent requests for DQ sampling (<= api_max_limit)
+
     # --- derived values ---
     @property
     def warehouse_location(self) -> str:
@@ -89,6 +104,16 @@ class Settings(BaseSettings):
     @property
     def table_identifier(self) -> str:
         return f"{self.namespace}.{self.table_name}"
+
+    @property
+    def agent_api_base_url(self) -> str:
+        """Base URL of the Stage 2A read API the agent calls as its tools.
+
+        Defaults to the local ``rtdp serve`` address when ``agent_api_url`` is unset, with no
+        trailing slash so endpoint paths can be appended directly.
+        """
+        url = self.agent_api_url or f"http://{self.api_host}:{self.api_port}"
+        return url.rstrip("/")
 
     def catalog_properties(self) -> dict[str, str]:
         """Properties passed to :class:`pyiceberg.catalog.sql.SqlCatalog`."""

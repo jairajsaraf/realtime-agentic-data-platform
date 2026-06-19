@@ -50,3 +50,16 @@ def test_env_override(monkeypatch):
 def test_source_enum():
     s = _settings(source="opensky-live")
     assert s.source is SourceKind.OPENSKY_LIVE
+
+
+def test_stream_defaults_and_env_override(monkeypatch):
+    s = _settings()
+    assert s.stream_interval_seconds == 60
+    assert s.stream_max_batches == 0
+    assert s.expire_retain_last == 10
+
+    monkeypatch.setenv("RTDP_STREAM_INTERVAL_SECONDS", "5")
+    monkeypatch.setenv("RTDP_EXPIRE_RETAIN_LAST", "3")
+    s2 = _settings()
+    assert s2.stream_interval_seconds == 5
+    assert s2.expire_retain_last == 3

@@ -133,3 +133,85 @@ class SyntheticSource:
                 t + 1, "fffff1", latitude=999.0, longitude=999.0
             ),  # bad coords -> FAIL
         ]
+
+
+def _continuous_record(icao24: str, tpos: int, rng: random.Random) -> dict:
+    """A valid OpenSky-shaped record for one aircraft at observation epoch ``tpos``.
+
+    All values stay within the DQ ranges, so a continuous batch passes DQ. ``last_contact``
+    equals ``time_position`` so the logical key advances in lockstep with ``event_time``.
+    """
+    return {
+        "icao24": icao24,
+        "callsign": f"{rng.choice(_AIRLINES)}{rng.randint(1, 9999)}",
+        "origin_country": rng.choice(_COUNTRIES),
+        "time_position": tpos,
+        "last_contact": tpos,
+        "longitude": round(rng.uniform(-180, 180), 4),
+        "latitude": round(rng.uniform(-90, 90), 4),
+        "baro_altitude": round(rng.uniform(0, 12000), 1),
+        "geo_altitude": round(rng.uniform(0, 12500), 1),
+        "on_ground": False,
+        "velocity": round(rng.uniform(0, 300), 1),
+        "true_track": round(rng.uniform(0, 360), 1),
+        "vertical_rate": round(rng.uniform(-15, 15), 1),
+        "squawk": f"{rng.randint(0, 7777):04d}",
+        "spi": False,
+        "position_source": rng.choice([0, 0, 0, 1, 2]),
+        "category": rng.randint(0, 20),
+    }
+
+
+class ContinuousSyntheticSource:
+    """Deterministic *continuous* generator for Stage 2B micro-batch ingestion.
+
+    Unlike :class:`SyntheticSource` (which returns the same fixed-window batch every call),
+    each ``fetch()`` advances the time window forward, so successive micro-batches have
+    strictly increasing ``event_time``. It emits a **stable fleet** of aircraft (one row per
+    aircraft per batch) so a read-time "latest state per aircraft" view returns exactly
+    ``fleet_size`` rows, and it deliberately includes ``dup_count`` within-batch duplicate
+    state rows (same ``(icao24, last_contact)``) to exercise the dedup step. Fully
+    reproducible: batch ``i`` depends only on ``(seed, i)`` via an integer-combined seed,
+    never on wall-clock or call order.
+
+    It is NOT real data and exists only for reproducible local/CI verification.
+    """
+
+    name = "opensky_synthetic_stream"
+
+    def __init__(
+        self,
+        *,
+        fleet_size: int = 8,
+        seed: int = 42,
+        base_date: str = "2026-06-14",
+        step_seconds: int = 60,
+        dup_count: int = 1,
+    ) -> None:
+        if fleet_size < 1:
+            raise ValueError("fleet_size must be >= 1")
+        if step_seconds < 1:
+            raise ValueError("step_seconds must be >= 1")
+        self._fleet = [f"{n:06x}" for n in range(1, fleet_size + 1)]
+        self._fleet_size = fleet_size
+        self._seed = seed
+        self._base_epoch = int(datetime.fromisoformat(base_date).replace(tzinfo=UTC).timestamp())
+        self._step_seconds = step_seconds
+        self._dup_count = dup_count
+        self._batch_index = 0
+
+    def fetch(self) -> RawBatch:
+        i = self._batch_index
+        # Integer-combined seed (random.Random does not accept tuple seeds): batch i is
+        # reproducible regardless of how many fetch() calls preceded it.
+        rng = random.Random(self._seed * 1_000_003 + i)
+        # Window base advances by step_seconds * fleet_size per batch. The within-batch span
+        # is fleet_size-1 < that step, so batch i+1's minimum event_time strictly exceeds
+        # batch i's maximum -> monotonically advancing across batches.
+        base = self._base_epoch + i * self._step_seconds * self._fleet_size
+        records = [_continuous_record(icao, base + k, rng) for k, icao in enumerate(self._fleet)]
+        # Within-batch duplicate(s) of the first aircraft's state row (identical key).
+        for _ in range(self._dup_count):
+            records.append(dict(records[0]))
+        self._batch_index += 1
+        return RawBatch(records=records, source_name=self.name)

@@ -16,7 +16,7 @@ from pyiceberg.expressions import (
 
 from rtdp import query
 from rtdp.ingest import run_ingest
-from rtdp.sources.synthetic import SyntheticSource
+from rtdp.sources.synthetic import ContinuousSyntheticSource, SyntheticSource
 
 
 def _seed(settings, n_rows, seed):
@@ -295,3 +295,35 @@ def test_health_unavailable_when_table_missing(file_settings):
     assert h.status == "unavailable"
     assert h.table_loadable is False
     assert h.error is not None
+
+
+# ------------------------------------------------- latest-state read model (Stage 2B)
+def test_query_latest_state_one_latest_row_per_aircraft(file_settings):
+    # Three micro-batches of a stable 4-aircraft fleet, each batch advancing event_time.
+    src = ContinuousSyntheticSource(fleet_size=4, seed=1, dup_count=0)
+    for _ in range(3):
+        run_ingest(file_settings, src)
+    table = query.load_bronze_table(file_settings)
+
+    res = query.query_latest_state(table, limit=1000)
+    assert res.count == 4  # exactly one row per aircraft
+    assert len({r["icao24"] for r in res.items}) == 4
+
+    # Each returned row is the newest (max last_contact) for its aircraft.
+    everything = query.query_flights(table, limit=10000).items
+    max_lc: dict[str, int] = {}
+    for r in everything:
+        max_lc[r["icao24"]] = max(max_lc.get(r["icao24"], -1), r["last_contact"])
+    for r in res.items:
+        assert r["last_contact"] == max_lc[r["icao24"]]
+
+
+def test_query_latest_state_icao24_filter(file_settings):
+    src = ContinuousSyntheticSource(fleet_size=4, seed=2, dup_count=0)
+    for _ in range(2):
+        run_ingest(file_settings, src)
+    table = query.load_bronze_table(file_settings)
+
+    res = query.query_latest_state(table, icao24="000001", limit=1000)
+    assert res.count == 1
+    assert res.items[0]["icao24"] == "000001"

@@ -8,6 +8,7 @@ from rtdp.transforms import (
     BRONZE_COLUMNS,
     bronze_rows_to_arrow,
     build_bronze_row,
+    dedupe_raw_records,
     normalize_callsign,
     raw_records_to_bronze,
     to_event_time,
@@ -99,6 +100,45 @@ def test_missing_both_timestamps_yields_null_event_time():
         source_name="s",
     )
     assert rows[0]["event_time"] is None
+
+
+# --------------------------------------------------------------- within-batch dedup
+def test_dedupe_collapses_same_icao24_last_contact_keeping_first():
+    first = _raw(icao24="abc123", last_contact=100, callsign="AAA")
+    dup = _raw(icao24="abc123", last_contact=100, callsign="BBB")
+    out = dedupe_raw_records([first, dup])
+    assert len(out) == 1
+    assert out[0]["callsign"] == "AAA"  # first occurrence kept
+
+
+def test_dedupe_keeps_distinct_keys():
+    out = dedupe_raw_records(
+        [
+            _raw(icao24="abc123", last_contact=100),
+            _raw(icao24="abc123", last_contact=101),  # same aircraft, later contact
+            _raw(icao24="def456", last_contact=100),  # different aircraft
+        ]
+    )
+    assert len(out) == 3
+
+
+def test_dedupe_passes_through_null_key_records():
+    # Records with a null icao24 or last_contact cannot form a key -> never dropped,
+    # so DQ still surfaces them.
+    out = dedupe_raw_records(
+        [
+            _raw(icao24=None, last_contact=100),
+            _raw(icao24=None, last_contact=100),
+            _raw(icao24="abc123", last_contact=None),
+        ]
+    )
+    assert len(out) == 3
+
+
+def test_dedupe_does_not_mutate_input():
+    records = [_raw(icao24="abc123", last_contact=100), _raw(icao24="abc123", last_contact=100)]
+    dedupe_raw_records(records)
+    assert len(records) == 2  # original list untouched
 
 
 def test_bronze_rows_to_arrow_schema_and_nullability():

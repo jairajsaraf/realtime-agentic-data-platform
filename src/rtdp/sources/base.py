@@ -26,3 +26,19 @@ class Source(Protocol):
     def fetch(self) -> RawBatch:
         """Return one batch of raw records."""
         ...
+
+
+@dataclass
+class PrefetchedSource:
+    """A :class:`Source` that returns an already-fetched batch verbatim.
+
+    Used by the Stage 2B micro-batch loop so a batch can be fetched once (a single
+    network call for live sources), inspected and deduped, then handed to
+    ``run_ingest`` without it re-fetching the underlying source.
+    """
+
+    name: str
+    batch: RawBatch
+
+    def fetch(self) -> RawBatch:
+        return self.batch

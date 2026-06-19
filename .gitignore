@@ -29,3 +29,6 @@ coverage.xml
 # Local planning docs (not part of the public deliverable)
 STAGE2A_SPEC.md
 SESSION_HANDOFF.md
+
+# Opt-in agent eval reports (live model output; never committed)
+_agent_eval_report*.json

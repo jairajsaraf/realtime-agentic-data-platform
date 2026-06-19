@@ -3,14 +3,18 @@
 [![codecov](https://codecov.io/github/jairajsaraf/realtime-agentic-data-platform/graph/badge.svg?token=PX1S7LTMYW)](https://codecov.io/github/jairajsaraf/realtime-agentic-data-platform)
 
 A locally reproducible data platform built **stage by stage**. Today it pairs an
-[Apache Iceberg](https://iceberg.apache.org/) lakehouse (**Stage 1**) with a
-read-only FastAPI serving layer over it (**Stage 2A**).
+[Apache Iceberg](https://iceberg.apache.org/) lakehouse (**Stage 1**) with a read-only FastAPI
+serving layer (**Stage 2A**), scheduled micro-batch ingestion (**Stage 2B**), and a
+natural-language **agent** that answers questions and diagnoses data quality by calling that read
+API as its tools (**Stage D**).
 
-> "Real-time" and "agentic" name the platform's **direction**, not its current state.
-> What exists today is batch and **scheduled micro-batch** ingestion into a real Iceberg
-> table plus a **read-only** typed HTTP API. This is near-real-time micro-batch, **not**
-> true streaming; true streaming (Kafka/Flink) and agent integration are later stages and
-> are **not built yet** (see [Out of scope & roadmap](#out-of-scope--roadmap)).
+> "Real-time" and "agentic" name the platform's **direction** — the words now have honest, narrow
+> backing, not their maximal meaning. "Real-time" is **scheduled micro-batch** ingestion into a
+> real Iceberg table (near-real-time, **not** true Kafka/Flink streaming). "Agentic" is a
+> **read-only, human-in-the-loop** agent over the typed HTTP API — it proposes remediations but
+> never mutates data, and there is no autonomous action, RAG, or fine-tuning. True streaming,
+> RAG/vector search, and dashboards remain **not built yet** (see
+> [Out of scope & roadmap](#out-of-scope--roadmap)).
 
 ## Project status
 
@@ -19,12 +23,13 @@ read-only FastAPI serving layer over it (**Stage 2A**).
 | **Stage 1 — Iceberg lakehouse** | ✅ Complete | A real catalog-backed Iceberg table with schema evolution, partition evolution, snapshot/time-travel, and ingestion-time data-quality checks — not a generic CSV-to-Parquet job. |
 | **Stage 2A — read-only serving layer** | ✅ Complete | A FastAPI service over the bronze table: typed flight reads, geographic bounding-box, interval aggregations, and Iceberg time-travel, behind an auto-generated OpenAPI schema. |
 | **Stage 2B — incremental micro-batch ingestion** | ✅ Complete | A scheduled `rtdp stream` loop that polls a source and appends micro-batches via the existing writer (within-batch dedup, skip-empty, read-time latest-state view, opt-in snapshot expiration). Near-real-time micro-batch — **not** true streaming. |
-| **Later stages** | ⬜ Planned | True streaming (Kafka/Flink), agent integration (Stage D), orchestration, dashboards, cloud deployment. |
+| **Stage D — agentic layer** | ✅ Complete | A natural-language agent (`rtdp agent`) that answers flight questions and diagnoses data quality by calling the Stage 2A HTTP API as tools. Strictly read-only and human-in-the-loop — proposes remediations, never mutates. Deterministic fake-LLM tests; opt-in live eval harness. |
+| **Later stages** | ⬜ Planned | True streaming (Kafka/Flink), RAG/vector search, fine-tuning, orchestration, dashboards, cloud deployment. |
 
 ## Architecture
 
 ```
-INGESTION  (Stage 1 batch / Stage 2B micro-batch CLI)  SERVING  (Stage 2A — read-only HTTP)
+INGESTION (Stage 1 batch / Stage 2B micro-batch CLI)   SERVING (Stage 2A HTTP)   AGENT (Stage D)
 
   source ── synthetic  (default, deterministic, CI)
   (rtdp.    live OpenSky (opt-in, network-gated, never committed)
@@ -41,16 +46,19 @@ INGESTION  (Stage 1 batch / Stage 2B micro-batch CLI)  SERVING  (Stage 2A — re
   catalog: SqlCatalog     storage: LocalStack S3 (primary)      │  read
   on SQLite                        file:// (no-Docker fallback)  │
      │                                                           ▼
-     └───────────────────────────────►  query layer  ─────►  FastAPI  ─────►  client
-                                         (rtdp.query)         (rtdp.api)       / future
-                                         pyiceberg pushdown   typed JSON,      Stage D
-                                         + DuckDB SQL          OpenAPI /docs    agent
+     └───────────────────────────────►  query layer  ─────►  FastAPI  ─────►  client / CLI
+                                         (rtdp.query)         (rtdp.api)          ▲
+                                         pyiceberg pushdown   typed JSON,         │ HTTP tool calls
+                                         + DuckDB SQL         OpenAPI /docs        │
+                                                                         Stage D agent (rtdp.agent)
+                                                                         NL question → tools → answer
 ```
 
-**Dependency direction (one-way):** `api → query → (catalog, config, schema)`. All read
+**Dependency direction (one-way):** `agent → API → query → (catalog, config, schema)`. All read
 logic lives in `rtdp.query` (transport-agnostic); the FastAPI layer (`rtdp.api`) is a thin
-transport over it, so the CLI and a future agent reuse the same functions. Ingestion never
-depends on the API, and the API never mutates the table.
+transport over it. The **Stage D agent (`rtdp.agent`) is just another HTTP client of the API** —
+it never imports `rtdp.query` or touches the catalog/DuckDB directly. Ingestion never depends on
+the API, and neither the API nor the agent mutates the table.
 
 ## Prerequisites
 
@@ -293,7 +301,7 @@ curl 'http://127.0.0.1:8000/flights?as_of_snapshot_id=<snapshot-id>&limit=5'
 ```
 
 **Limitations (local-first):** no auth, rate-limiting, or caching yet, and no write path through
-the API. Stage D (agent integration over this API) is intentionally deferred.
+the API. The Stage D agent consumes this API as its tool surface (see below).
 
 ---
 
@@ -342,6 +350,54 @@ never expired.
 
 ---
 
+## Stage D — agentic layer over the read API
+
+`rtdp agent` is a natural-language agent that answers questions about the flight data and
+diagnoses data quality **by calling the Stage 2A HTTP API as its tools**. It is strictly an API
+client: it never imports `rtdp.query` or reaches into the catalog/DuckDB, and it is **read-only
+and human-in-the-loop** — it can *propose* remediations but never mutates tables, data, schemas,
+or files, and adds no write surface (`agent → API → query → catalog`).
+
+- **Tools from OpenAPI.** Tool definitions are derived from the live `/openapi.json` (a curated
+  read-only allowlist of the GET endpoints), with a static fallback. There is deliberately **no
+  write tool**, so the agent is structurally incapable of changing anything.
+- **Grounded answers.** Every answer cites which endpoint and which Iceberg snapshot id produced
+  it; provenance is taken from the tool results themselves, not from the model's prose.
+- **DQ diagnosis (read-derived).** Pandera WARN/FAIL history is not persisted and there is no DQ
+  endpoint, so the agent **re-derives** anomalies (over-speed, unknown `position_source`,
+  out-of-range coordinates/altitude, null required fields, duplicate state keys) from the rows the
+  API returns and proposes fixes for a human to apply. This is a **bounded sample** — one queried
+  window, capped by the API row limit, over the snapshots queried — and the agent says so.
+- **Config-driven LLM.** The model sits behind a thin OpenAI-compatible client (built on the
+  existing `httpx`; no model SDK). Endpoint, key, and model name come from `RTDP_AGENT_*` settings,
+  so an open dev model (e.g. an NVIDIA NIM endpoint) and a frontier model are a config swap — no
+  keys are committed.
+
+### Run it
+
+```bash
+# 1. Seed data and start the read-only API (the agent talks to it over HTTP):
+uv run rtdp ingest --source synthetic --rows 80
+uv run rtdp serve                                   # http://127.0.0.1:8000
+
+# 2. Configure an OpenAI-compatible model endpoint (example: NVIDIA NIM):
+#   PowerShell:  $env:RTDP_AGENT_BASE_URL="https://integrate.api.nvidia.com/v1"
+#                $env:RTDP_AGENT_MODEL="meta/llama-3.1-8b-instruct"
+#                $env:RTDP_AGENT_API_KEY="<your key>"
+
+# 3. Ask (one-shot), or run interactively:
+uv run rtdp agent "How many records are there, and which snapshot answered?"
+uv run rtdp agent --interactive
+```
+
+Swap to a frontier provider by pointing `RTDP_AGENT_BASE_URL` / `RTDP_AGENT_MODEL` at any other
+OpenAI-compatible endpoint — no code change. **Testing split:** unit tests drive the agent with a
+deterministic **fake LLM** (no network, no keys; runs in CI), while a separate **opt-in** live
+eval harness (`scripts/eval_agent.py`, network-gated, never in CI) reports grounding/faithfulness,
+tool-call correctness, latency, and token usage against a real model. See `RUNBOOK.md`.
+
+---
+
 ## Testing
 
 ```bash
@@ -354,16 +410,17 @@ integration job against LocalStack S3. See `RUNBOOK.md` for a step-by-step fresh
 
 ## Out of scope & roadmap
 
-**Not built yet (intentionally):** true streaming (Kafka/Flink), agents / LLM tool execution,
-orchestration, dashboards, real cloud deployment, production IAM, and data-file compaction. The
-table/partition design anticipates continued appends to the same tables without a rewrite, and the
-read API is structured so a future agent can call it.
+**Not built yet (intentionally):** true streaming (Kafka/Flink), RAG / vector search, model
+fine-tuning, autonomous remediation (the Stage D agent *proposes*; a human applies), orchestration,
+dashboards, real cloud deployment, production IAM, and data-file compaction. The table/partition
+design anticipates continued appends without a rewrite, and the read API doubles as the agent's
+tool surface.
 
 **Direction for later stages (not commitments):**
 
 - **True streaming** — a continuous (Kafka/Flink-style) pipeline, beyond Stage 2B's scheduled
   micro-batch loop.
-- **Stage D — agent integration** — an agent that calls the read-only API over its typed OpenAPI
-  surface.
+- **Retrieval (RAG) / vector search** and **richer agent autonomy** beyond the current read-only,
+  human-in-the-loop agent.
 - **Orchestration & dashboards**, then **cloud deployment** (real AWS S3 is already a config-only
   swap).

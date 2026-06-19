@@ -81,6 +81,33 @@ def build_bronze_row(
     }
 
 
+def dedupe_raw_records(records: list[dict]) -> list[dict]:
+    """Drop within-batch duplicates keyed on ``(icao24, last_contact)``, keeping the
+    first occurrence.
+
+    Used by the Stage 2B micro-batch loop so repeated state rows in a single poll
+    collapse to one logical observation per aircraft-contact (the same key the
+    ``unique_state_key`` DQ warning uses). Records missing either key (``icao24`` or
+    ``last_contact`` is ``None``) cannot form a key and are passed through unchanged,
+    so DQ still surfaces them rather than having them silently dropped. The input list
+    and its records are not mutated.
+    """
+    seen: set[tuple] = set()
+    out: list[dict] = []
+    for record in records:
+        icao24 = record.get("icao24")
+        last_contact = record.get("last_contact")
+        if icao24 is None or last_contact is None:
+            out.append(record)
+            continue
+        key = (icao24, last_contact)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(record)
+    return out
+
+
 def raw_records_to_bronze(
     records: list[dict],
     *,

@@ -7,9 +7,10 @@ A locally reproducible data platform built **stage by stage**. Today it pairs an
 read-only FastAPI serving layer over it (**Stage 2A**).
 
 > "Real-time" and "agentic" name the platform's **direction**, not its current state.
-> What exists today is **batch** ingestion into a real Iceberg table plus a **read-only**
-> typed HTTP API. Streaming ingestion and agent integration are later stages and are
-> **not built yet** (see [Out of scope & roadmap](#out-of-scope--roadmap)).
+> What exists today is batch and **scheduled micro-batch** ingestion into a real Iceberg
+> table plus a **read-only** typed HTTP API. This is near-real-time micro-batch, **not**
+> true streaming; true streaming (Kafka/Flink) and agent integration are later stages and
+> are **not built yet** (see [Out of scope & roadmap](#out-of-scope--roadmap)).
 
 ## Project status
 
@@ -17,12 +18,13 @@ read-only FastAPI serving layer over it (**Stage 2A**).
 | --- | --- | --- |
 | **Stage 1 — Iceberg lakehouse** | ✅ Complete | A real catalog-backed Iceberg table with schema evolution, partition evolution, snapshot/time-travel, and ingestion-time data-quality checks — not a generic CSV-to-Parquet job. |
 | **Stage 2A — read-only serving layer** | ✅ Complete | A FastAPI service over the bronze table: typed flight reads, geographic bounding-box, interval aggregations, and Iceberg time-travel, behind an auto-generated OpenAPI schema. |
-| **Later stages** | ⬜ Planned | Streaming ingestion, agent integration (Stage D), orchestration, dashboards, cloud deployment. |
+| **Stage 2B — incremental micro-batch ingestion** | ✅ Complete | A scheduled `rtdp stream` loop that polls a source and appends micro-batches via the existing writer (within-batch dedup, skip-empty, read-time latest-state view, opt-in snapshot expiration). Near-real-time micro-batch — **not** true streaming. |
+| **Later stages** | ⬜ Planned | True streaming (Kafka/Flink), agent integration (Stage D), orchestration, dashboards, cloud deployment. |
 
 ## Architecture
 
 ```
-INGESTION  (Stage 1 — batch, via the rtdp CLI)         SERVING  (Stage 2A — read-only HTTP)
+INGESTION  (Stage 1 batch / Stage 2B micro-batch CLI)  SERVING  (Stage 2A — read-only HTTP)
 
   source ── synthetic  (default, deterministic, CI)
   (rtdp.    live OpenSky (opt-in, network-gated, never committed)
@@ -295,6 +297,51 @@ the API. Stage D (agent integration over this API) is intentionally deferred.
 
 ---
 
+## Stage 2B — incremental micro-batch ingestion
+
+`rtdp stream` turns the one-shot batch ingest into a **scheduled micro-batch loop**: it polls a
+source on a timer and appends one micro-batch per interval, **reusing the unchanged Stage 1
+`run_ingest` writer**. This is **near-real-time micro-batch ingestion, not true streaming** —
+Kafka/Flink-style streaming remains out of scope.
+
+Each tick fetches one batch, **de-duplicates within the batch** on the logical key
+`(icao24, last_contact)`, **skips empty polls** (so an empty OpenSky response never mints an empty
+snapshot), and appends via `run_ingest`. The loop backs off on transient source errors (e.g.
+OpenSky rate limits) and stops cleanly on Ctrl+C. Bronze stays an **append-only event log**;
+"latest state per aircraft" is a **read-time** concern, exposed as `rtdp.query.query_latest_state`
+(a DuckDB `ROW_NUMBER()` window over bronze — a thin silver-style read model, no row updates, no
+MERGE).
+
+### Run it
+
+```bash
+docker compose up -d                                  # LocalStack S3 (or export RTDP_STORAGE_BACKEND=file)
+uv run rtdp stream --source synthetic --interval 5 --max-batches 10
+#   live data (opt-in, network-gated, NEVER in CI — see the OpenSky note above):
+#   uv run rtdp stream --source opensky-live --interval 60
+```
+
+`--max-batches 0` (the default) runs until interrupted. Tune the cadence with `--interval` or
+`RTDP_STREAM_INTERVAL_SECONDS`. The synthetic path uses a deterministic *continuous* generator
+that advances event-time across batches, so CI exercises the loop with no Docker/network.
+
+### Snapshot maintenance (metadata-only)
+
+Micro-batch appends accumulate snapshots (and small data files). Bound snapshot/metadata growth
+with an explicit, opt-in maintenance command:
+
+```bash
+uv run rtdp maintain expire-snapshots --retain 10     # keep the newest 10 snapshots
+```
+
+This expires old snapshots from the **table metadata only** — it does **not** delete data files
+and is **not compaction**. Data-file compaction/rewrite is a true-engine (e.g. Spark) capability,
+intentionally **not faked** here; it ties back to the Stage 1 pyiceberg/no-JVM trade-off
+(small-file accumulation is a known limitation of this pure-Python build). The current snapshot is
+never expired.
+
+---
+
 ## Testing
 
 ```bash
@@ -307,15 +354,16 @@ integration job against LocalStack S3. See `RUNBOOK.md` for a step-by-step fresh
 
 ## Out of scope & roadmap
 
-**Not built yet (intentionally):** streaming ingestion, agents / LLM tool execution, orchestration,
-dashboards, Kafka/Flink, real cloud deployment, and production IAM. The table/partition design
-anticipates streaming appends to the same tables without a rewrite, and the read API is structured
-so a future agent can call it.
+**Not built yet (intentionally):** true streaming (Kafka/Flink), agents / LLM tool execution,
+orchestration, dashboards, real cloud deployment, production IAM, and data-file compaction. The
+table/partition design anticipates continued appends to the same tables without a rewrite, and the
+read API is structured so a future agent can call it.
 
 **Direction for later stages (not commitments):**
 
-- **Streaming ingestion** — continuous appends alongside the existing batch path.
-- **Stage D — agent integration** — an agent that calls this read-only API over its typed OpenAPI
+- **True streaming** — a continuous (Kafka/Flink-style) pipeline, beyond Stage 2B's scheduled
+  micro-batch loop.
+- **Stage D — agent integration** — an agent that calls the read-only API over its typed OpenAPI
   surface.
 - **Orchestration & dashboards**, then **cloud deployment** (real AWS S3 is already a config-only
   swap).

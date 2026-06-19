@@ -1,7 +1,7 @@
 [project]
 name = "rtdp"
 version = "0.1.0"
-description = "Real-time agentic data platform — Stage 1: locally reproducible Apache Iceberg lakehouse"
+description = "Real-time agentic data platform — Apache Iceberg lakehouse (Stage 1), read-only serving layer (Stage 2A), and incremental micro-batch ingestion (Stage 2B)"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     api_default_limit: int = 100
     api_max_limit: int = 1000
 
+    # --- incremental micro-batch ingestion (Stage 2B) ---
+    stream_interval_seconds: int = 60  # seconds between micro-batch polls in `rtdp stream`
+    stream_max_batches: int = 0  # 0 = run until interrupted
+    expire_retain_last: int = 10  # default snapshots to keep for `rtdp maintain expire-snapshots`
+
     # --- derived values ---
     @property
     def warehouse_location(self) -> str:

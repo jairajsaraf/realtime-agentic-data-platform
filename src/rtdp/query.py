@@ -230,6 +230,26 @@ def _select_page(
         return con.execute(sql, bind).to_arrow_table().to_pylist()
 
 
+def _latest_state_page(arrow: pa.Table, *, limit: int, offset: int) -> list[dict]:
+    """The latest row per ``icao24`` via a DuckDB window, then deterministic paging.
+
+    ``row_number()`` partitions by aircraft and orders newest-first by ``last_contact``,
+    then ``event_time`` and ``ingest_time`` as deterministic tie-breakers (two ingests of
+    the same observation across snapshots resolve to the newest write). Columns come from
+    ``FLIGHT_FIELDS`` (schema-derived, never caller input); limit/offset are bound params.
+    """
+    cols = ", ".join(FLIGHT_FIELDS)
+    sql = (
+        f"with ranked as (select {cols}, row_number() over ("
+        "partition by icao24 order by last_contact desc, event_time desc, ingest_time desc"
+        f") as rn from sv) select {cols} from ranked where rn = 1 "
+        "order by icao24 limit ? offset ?"
+    )
+    with _connect_utc() as con:
+        con.register("sv", arrow)
+        return con.execute(sql, [limit, offset]).to_arrow_table().to_pylist()
+
+
 # ----------------------------------------------------------------------------- reads
 def query_flights(
     table: Table,
@@ -282,6 +302,30 @@ def query_bbox(
         limit=limit,
         offset=offset,
     )
+    return FlightsResult(_effective_snapshot_id(table, resolved), len(items), items)
+
+
+def query_latest_state(
+    table: Table,
+    *,
+    icao24: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    as_of_snapshot_id: int | None = None,
+    as_of_timestamp: datetime | None = None,
+) -> FlightsResult:
+    """Latest state per aircraft — a read-time silver model over the append-only bronze log.
+
+    Bronze stays an immutable event log; "latest per aircraft" is a read-time concern computed
+    with a DuckDB window (no table mutation, no MERGE). An optional ``icao24`` filter is pushed
+    into the scan; time-travel selectors apply as for the other reads. ``count`` is the number
+    of items returned after ``limit``/``offset`` (one row per aircraft before paging)."""
+    resolved = resolve_snapshot_id(
+        table, as_of_snapshot_id=as_of_snapshot_id, as_of_timestamp=as_of_timestamp
+    )
+    row_filter = build_row_filter(icao24=icao24)
+    arrow = _scan_arrow(table, resolved, row_filter, FLIGHT_FIELDS)
+    items = _latest_state_page(arrow, limit=limit, offset=offset)
     return FlightsResult(_effective_snapshot_id(table, resolved), len(items), items)
 
 

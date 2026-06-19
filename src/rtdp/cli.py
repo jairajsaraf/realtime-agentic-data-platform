@@ -1,9 +1,11 @@
 """Command-line entry point.
 
-``rtdp info``    prints the resolved configuration.
-``rtdp ingest``  runs one ingestion batch into the bronze Iceberg table.
-``rtdp demo``    Iceberg capability demos (Phase 3).
-``rtdp serve``   starts the read-only FastAPI serving layer (Stage 2A).
+``rtdp info``     prints the resolved configuration.
+``rtdp ingest``   runs one ingestion batch into the bronze Iceberg table.
+``rtdp demo``     Iceberg capability demos (Phase 3).
+``rtdp serve``    starts the read-only FastAPI serving layer (Stage 2A).
+``rtdp stream``   scheduled micro-batch ingestion (Stage 2B; near-real-time, not true streaming).
+``rtdp maintain`` table maintenance, e.g. snapshot expiration (Stage 2B; metadata-only).
 """
 
 from __future__ import annotations
@@ -101,6 +103,73 @@ def _serve(settings: Settings) -> int:
     return 0
 
 
+def _stream(settings: Settings, args: argparse.Namespace) -> int:
+    from .sources.synthetic import ContinuousSyntheticSource
+    from .stream import run_stream
+
+    source_kind = args.source or settings.source.value
+    if source_kind == "opensky-live":
+        from .sources.opensky import OpenSkyLiveSource
+
+        source = OpenSkyLiveSource(settings)
+    else:
+        source = ContinuousSyntheticSource(fleet_size=args.rows, seed=args.seed)
+
+    interval = args.interval if args.interval is not None else settings.stream_interval_seconds
+    max_batches = (
+        args.max_batches if args.max_batches is not None else settings.stream_max_batches
+    )
+
+    print(
+        f"Streaming micro-batches from {source.name} every {interval}s "
+        f"(max_batches={max_batches or 'unbounded'}). Near-real-time micro-batch ingestion — "
+        f"NOT true streaming. Ctrl+C to stop."
+    )
+
+    def _on_batch(i: int, result) -> None:
+        dq = "PASS" if result.dq.ok else "FAIL"
+        print(
+            f"  batch {i}: wrote {result.rows_written} rows -> snapshot {result.snapshot_id} "
+            f"(snapshot_count={result.snapshot_count}); DQ {dq}"
+        )
+
+    def _on_skip(i: int) -> None:
+        print(f"  batch {i}: empty batch — skipped (no snapshot)")
+
+    def _on_error(i: int, exc: Exception) -> None:
+        print(f"  batch {i}: error: {exc} — backing off, will retry", file=sys.stderr)
+
+    results = run_stream(
+        settings,
+        source,
+        interval_seconds=interval,
+        max_batches=max_batches,
+        on_batch=_on_batch,
+        on_skip=_on_skip,
+        on_error=_on_error,
+    )
+    print(f"Stream stopped after {len(results)} appended micro-batch(es).")
+    return 0
+
+
+def _maintain(settings: Settings, args: argparse.Namespace) -> int:
+    from . import query
+    from .maintenance import expire_snapshots
+
+    if args.action == "expire-snapshots":
+        retain = args.retain if args.retain is not None else settings.expire_retain_last
+        table = query.load_bronze_table(settings)
+        expired = expire_snapshots(table, retain_last=retain)
+        print(
+            f"Expired {len(expired)} snapshot(s); retained the newest {retain}. "
+            f"Metadata-only maintenance — data files are NOT deleted (not compaction)."
+        )
+        return 0
+
+    print(f"Unknown maintenance action: {args.action}", file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rtdp", description="Stage 1 Iceberg lakehouse CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -132,6 +201,30 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("serve", help="Start the read-only FastAPI serving layer (Stage 2A)")
 
+    stream = sub.add_parser(
+        "stream",
+        help="Scheduled micro-batch ingestion (Stage 2B; near-real-time, not true streaming)",
+    )
+    stream.add_argument("--source", choices=["synthetic", "opensky-live"], default=None)
+    stream.add_argument(
+        "--interval", type=int, default=None, help="seconds between polls (default from settings)"
+    )
+    stream.add_argument(
+        "--max-batches", type=int, default=None, help="number of batches; 0 = until interrupted"
+    )
+    stream.add_argument(
+        "--rows", type=int, default=8, help="synthetic fleet size per batch (default 8)"
+    )
+    stream.add_argument("--seed", type=int, default=42, help="synthetic seed (default 42)")
+
+    maintain = sub.add_parser(
+        "maintain", help="Table maintenance (Stage 2B; snapshot expiration is metadata-only)"
+    )
+    maintain.add_argument("action", choices=["expire-snapshots"])
+    maintain.add_argument(
+        "--retain", type=int, default=None, help="snapshots to keep (default from settings)"
+    )
+
     args = parser.parse_args(argv)
     settings = Settings()
 
@@ -143,6 +236,10 @@ def main(argv: list[str] | None = None) -> int:
         return _demo(settings, args)
     if args.command == "serve":
         return _serve(settings)
+    if args.command == "stream":
+        return _stream(settings, args)
+    if args.command == "maintain":
+        return _maintain(settings, args)
 
     parser.print_help()
     return 1

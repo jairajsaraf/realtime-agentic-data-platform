@@ -72,7 +72,8 @@ Success: prints `metadata.json`, `.avro`, `.parquet` counts > 0 and `event_day=.
 ```powershell
 uv run pytest -m localstack
 ```
-Success: `4 passed` (bucket round-trip, bronze ingest, demo on S3, read API over S3).
+Success: `5 passed` (bucket round-trip, bronze ingest, demo on S3, read API over S3,
+micro-batch append loop over S3).
 
 ---
 
@@ -93,7 +94,7 @@ This path is a dev/CI convenience — **not** the target architecture.
 ## C. Tests & lint (no Docker)
 
 ```powershell
-uv run pytest -m "not localstack"     # -> 77 passed, 4 deselected
+uv run pytest -m "not localstack"     # -> 97 passed, 5 deselected
 uv run ruff check .                    # -> All checks passed!
 ```
 
@@ -129,7 +130,34 @@ echoes the resolved `snapshot_id`. Read-only and local-first: no auth/rate-limit
 
 ---
 
-## E. Live OpenSky (optional — real public data, NOT run in CI)
+## E. Incremental micro-batch ingestion (Stage 2B — near-real-time, not true streaming)
+
+```powershell
+# scheduled micro-batch loop: poll a source and append one micro-batch per interval
+uv run rtdp stream --source synthetic --interval 5 --max-batches 10
+```
+Success: one line per batch (`batch N: wrote R rows -> snapshot ...; DQ PASS`) and `snapshot_count`
+climbs by one per non-empty batch. `--max-batches 0` (default) runs until `Ctrl+C`. Override the
+cadence with `--interval` or `RTDP_STREAM_INTERVAL_SECONDS`. The synthetic path uses a deterministic
+continuous generator (advancing event-time, stable fleet) — no Docker/network needed on `file://`.
+
+Within-batch duplicates on `(icao24, last_contact)` are dropped before append; empty polls are
+skipped (no empty snapshot); transient source errors back off and retry. Bronze stays append-only —
+read the **read-time** latest-state (one row per aircraft) via `rtdp.query.query_latest_state`.
+
+Snapshot/metadata-growth maintenance (opt-in, **metadata-only — NOT compaction**):
+```powershell
+uv run rtdp maintain expire-snapshots --retain 10
+```
+Success: `Expired N snapshot(s); retained the newest 10. Metadata-only ...`. Removes old snapshots
+from the table metadata; does **not** delete data files or compact small files. Current snapshot is
+never expired.
+
+Live data (opt-in, network-gated, NEVER in CI): `uv run rtdp stream --source opensky-live --interval 60`.
+
+---
+
+## F. Live OpenSky (optional — real public data, NOT run in CI)
 
 ```powershell
 uv run rtdp ingest --source opensky-live
@@ -140,7 +168,7 @@ Opt-in and network-gated; hits the real OpenSky API. Anonymous tier works for a 
 
 ---
 
-## F. Cleanup
+## G. Cleanup
 
 ```powershell
 docker compose down                   # stop + remove LocalStack (its S3 data is ephemeral)
@@ -159,12 +187,14 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
 - [ ] Schema-evolution demo works (add nullable column; old vs new snapshot)
 - [ ] Partition-evolution demo works **without rewriting** existing data
 - [ ] Time-travel / snapshot demo works
-- [ ] `pytest -m "not localstack"` (77) and `-m localstack` (4) pass; `ruff` clean
+- [ ] `pytest -m "not localstack"` (97) and `-m localstack` (5) pass; `ruff` clean
 - [ ] Real AWS S3 is a config-only swap (`RTDP_STORAGE_BACKEND=aws`)
 - [ ] `file://` fallback runs everything without Docker
 - [ ] `rtdp serve` starts the read-only API; `/docs` renders OpenAPI for all six endpoints
+- [ ] `rtdp stream` runs the scheduled micro-batch loop (within-batch dedup, skip-empty,
+      read-time latest-state); `rtdp maintain expire-snapshots` bounds snapshot growth (metadata-only)
 
-## Known limitations (Stage 1)
+## Known limitations
 
 - The committed/CI data path is **synthetic** (OpenSky-shaped). Real OpenSky is **opt-in**
   (`--source opensky-live`), network-gated, never run in CI, never committed.
@@ -176,7 +206,12 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
   before re-ingesting. Fresh clones and CI are unaffected.
 - Partition evolution day→hour is a **replace** (pyiceberg rejects two partition fields on one
   source column); existing data is still not rewritten.
-- pyiceberg cannot compact / rewrite data files (out of scope for Stage 1).
-- **Out of scope:** streaming ingestion, agents, orchestration, dashboards, Kafka/Flink,
+- **Stage 2B micro-batch growth:** each interval appends a snapshot (and small data file), so
+  snapshots/metadata and small files accumulate. `rtdp maintain expire-snapshots` bounds
+  snapshot/metadata growth, but it is **metadata-only**: pyiceberg can expire snapshots yet
+  **cannot compact / rewrite or delete data files** in this build. Data-file compaction is a
+  true-engine (e.g. Spark) concern, intentionally **not faked** here — a direct consequence of the
+  Stage 1 pyiceberg/no-JVM trade-off.
+- **Out of scope:** true streaming (Kafka/Flink), agents, orchestration, dashboards,
   real AWS deployment, production IAM.
 ```

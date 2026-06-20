@@ -20,6 +20,17 @@ dependencies = [
 [project.scripts]
 rtdp = "rtdp.cli:main"
 
+[project.optional-dependencies]
+# Opt-in OpenTelemetry export (Stage E). NOT installed by default; the telemetry boundary in
+# rtdp.telemetry stays no-op unless RTDP_OTEL_ENABLED is set AND this extra is installed.
+# Install with: uv sync --extra otel
+otel = [
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp>=1.27",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8",

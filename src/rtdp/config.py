@@ -25,6 +25,11 @@ class SourceKind(StrEnum):
     OPENSKY_LIVE = "opensky-live"
 
 
+class LogFormat(StrEnum):
+    TEXT = "text"
+    JSON = "json"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="RTDP_",
@@ -87,6 +92,16 @@ class Settings(BaseSettings):
     agent_max_tool_calls: int = 12  # total tool executions per question (caps multi-call fan-out)
     agent_temperature: float = 0.0  # near-deterministic generation
     agent_max_rows: int = 1000  # row cap the agent requests for DQ sampling (<= api_max_limit)
+
+    # --- observability / telemetry (Stage E) ---
+    # No-op by default: tracing export is OFF unless `otel_enabled` is true AND the optional
+    # `[otel]` extra is installed (see rtdp.telemetry). Provider-agnostic — point the OTLP
+    # endpoint at a collector / the Datadog Agent. No keys/secrets are read here.
+    otel_enabled: bool = False
+    otel_service_name: str = "rtdp"
+    otel_exporter_otlp_endpoint: str | None = None  # e.g. http://localhost:4317; None = SDK default
+    log_format: LogFormat = LogFormat.TEXT  # structured JSON logs in deploy via `json`
+    log_level: str = "INFO"
 
     # --- derived values ---
     @property

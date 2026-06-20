@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     storage_backend: StorageBackend = StorageBackend.LOCALSTACK
 
     # --- S3 / object storage (localstack + aws backends) ---
-    s3_endpoint_url: str = "http://localhost:4566"
+    s3_endpoint_url: str = "http://localhost:4566"  # localstack always; aws only when set (MinIO)
     s3_bucket: str = "lakehouse"
     s3_warehouse_prefix: str = "warehouse"
     aws_region: str = "us-east-1"
@@ -145,8 +145,14 @@ class Settings(BaseSettings):
             props["s3.access-key-id"] = self.aws_access_key_id
             props["s3.secret-access-key"] = self.aws_secret_access_key
             props["s3.region"] = self.aws_region
-            if self.storage_backend is StorageBackend.LOCALSTACK:
-                # LocalStack custom endpoint. Leave path-style at pyarrow's default
-                # (force-virtual-addressing=False) — LocalStack requires path-style.
+            # LocalStack always needs its custom endpoint. The `aws` backend targets real AWS
+            # by default, but honors an explicitly set RTDP_S3_ENDPOINT_URL so the same backend
+            # can point at an S3-compatible store (e.g. self-hosted MinIO); with no override it
+            # uses real-AWS endpoints. Path-style stays at pyarrow's default
+            # (force-virtual-addressing=False), which LocalStack and MinIO both require.
+            custom_endpoint = self.storage_backend is StorageBackend.LOCALSTACK or (
+                "s3_endpoint_url" in self.model_fields_set and bool(self.s3_endpoint_url)
+            )
+            if custom_endpoint:
                 props["s3.endpoint"] = self.s3_endpoint_url
         return props

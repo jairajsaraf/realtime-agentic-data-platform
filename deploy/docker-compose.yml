@@ -1,18 +1,15 @@
 # Stage E — single-host deployed topology (one image, multiple entrypoints).
 #
-# Run from the repo root, e.g.:
-#   docker compose -f deploy/docker-compose.yml up -d --build
+# Run from the repo root:
+#   docker compose -f deploy/docker-compose.yml up -d --build           # file:// (default)
+#   docker compose -f deploy/docker-compose.yml --profile s3 up -d      # MinIO / aws backend
 #
-# Default `up` runs the read API + the micro-batch stream loop on the file:// backend,
-# sharing one volume (the SQLite catalog + warehouse live on the same filesystem, as the
-# catalog is single-writer SQLite). This is runnable today with no secrets.
-#
-# Two gated scaffolds are intentionally NOT wired yet and stay behind opt-in profiles:
-#   * profile "s3"  — MinIO object storage. Pointing rtdp at MinIO via the `aws` backend
-#                     needs the custom-S3-endpoint change in config.py (Stage E plan, Risk
-#                     R1) — that change is approval-gated, so MinIO is defined but unused.
-#   * (observability) — the OTel collector / Datadog Agent is added in Stage E phase E2
-#                     (needs the optional [otel] extra + a Datadog key) — also gated.
+# Backend selection is env-driven so the same app services run on the file:// backend (the
+# default, runnable with no secrets) or on an S3-compatible store. For the MinIO path, set
+# RTDP_STORAGE_BACKEND=aws and bring up the `s3` profile; the rtdp `aws` backend honors
+# RTDP_S3_ENDPOINT_URL (config Risk R1 support) and the MinIO bucket is created by `minio-init`.
+# Secrets/config are supplied at run time (e.g. `doppler run -- docker compose ...` or a local,
+# gitignored .env) — see deploy/README.md and deploy/.env.example. No real keys are committed.
 
 x-rtdp-image: &rtdp-image
   build:
@@ -20,18 +17,24 @@ x-rtdp-image: &rtdp-image
     dockerfile: Dockerfile
   image: rtdp:local
 
-x-rtdp-file-env: &rtdp-file-env
-  RTDP_STORAGE_BACKEND: file
+x-rtdp-env: &rtdp-env
+  RTDP_STORAGE_BACKEND: ${RTDP_STORAGE_BACKEND:-file}
   RTDP_LOCAL_WAREHOUSE_DIR: /data/warehouse
-  RTDP_CATALOG_DB_PATH: /data/warehouse/catalog.db
+  RTDP_CATALOG_DB_PATH: /data/warehouse/catalog.db   # catalog is local SQLite in every backend
+  # S3-compatible (MinIO/AWS) — used only when RTDP_STORAGE_BACKEND=aws:
+  RTDP_S3_ENDPOINT_URL: ${RTDP_S3_ENDPOINT_URL:-http://minio:9000}
+  RTDP_S3_BUCKET: ${RTDP_S3_BUCKET:-lakehouse}
+  RTDP_AWS_ACCESS_KEY_ID: ${RTDP_AWS_ACCESS_KEY_ID:-}
+  RTDP_AWS_SECRET_ACCESS_KEY: ${RTDP_AWS_SECRET_ACCESS_KEY:-}
+  RTDP_AWS_REGION: ${RTDP_AWS_REGION:-us-east-1}
 
 services:
-  # Public read API (the only externally exposed service).
+  # Public read API (the only externally exposed app service).
   api:
     <<: *rtdp-image
     command: ["serve"]
     environment:
-      <<: *rtdp-file-env
+      <<: *rtdp-env
       RTDP_API_HOST: "0.0.0.0"
       RTDP_API_PORT: "8000"
     ports:
@@ -56,8 +59,8 @@ services:
     <<: *rtdp-image
     command: ["stream", "--source", "synthetic"]
     environment:
-      <<: *rtdp-file-env
-      RTDP_STREAM_INTERVAL_SECONDS: "60"
+      <<: *rtdp-env
+      RTDP_STREAM_INTERVAL_SECONDS: "${RTDP_STREAM_INTERVAL_SECONDS:-60}"
     volumes:
       - rtdp-state:/data
     restart: unless-stopped
@@ -72,28 +75,50 @@ services:
     <<: *rtdp-image
     command: ["maintain", "expire-snapshots"]
     environment:
-      <<: *rtdp-file-env
+      <<: *rtdp-env
     volumes:
       - rtdp-state:/data
     profiles: ["maintain"]
     restart: "no"
 
-  # --- gated scaffold: object storage (not active by default) ---
-  # Activating the S3 path also requires the config.py custom-endpoint change (Risk R1, gated).
+  # --- object storage (profile "s3"): self-hosted MinIO via the rtdp `aws` backend ---
   minio:
     image: minio/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
-      # No secrets are committed: these must be supplied (e.g. via Doppler / a local .env).
+      # No secrets committed: these MUST be supplied at run time (Doppler / a local .env).
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER (e.g. via Doppler or a local .env)}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD (e.g. via Doppler or a local .env)}
+    expose:
+      - "9000"                         # S3 API — internal network only (reached as minio:9000)
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9001:9001"          # console bound to localhost only — private/local-only
     volumes:
       - minio-data:/data
     profiles: ["s3"]
     restart: unless-stopped
+
+  # One-shot: create the warehouse bucket in MinIO (idempotent). The `aws` backend does not
+  # auto-create buckets, so this replaces the LocalStack-only ensure_bucket for the MinIO path.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER (e.g. via Doppler or a local .env)}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD (e.g. via Doppler or a local .env)}
+      RTDP_S3_BUCKET: ${RTDP_S3_BUCKET:-lakehouse}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do
+          echo "waiting for minio..."; sleep 1;
+        done
+        mc mb --ignore-existing "local/$$RTDP_S3_BUCKET"
+        echo "bucket ready: $$RTDP_S3_BUCKET"
+    profiles: ["s3"]
+    restart: "no"
 
 volumes:
   rtdp-state:

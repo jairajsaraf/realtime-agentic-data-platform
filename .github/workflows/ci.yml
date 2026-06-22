@@ -36,6 +36,32 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
 
+  # Run the telemetry suite with the optional [otel] extra so Codecov sees the OTel-enabled
+  # branches (the default `test` job installs no extra and can only reach the no-op paths).
+  # Key-free: reuses the existing CODECOV_TOKEN; the tests never export spans over the network.
+  telemetry-otel:
+    name: telemetry coverage ([otel] extra)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.21"
+      - name: Install Python 3.12
+        run: uv python install 3.12
+      - name: Sync dependencies (with [otel] extra)
+        run: uv sync --frozen --extra otel
+      - name: Telemetry tests (OTel-enabled branches)
+        run: uv run --extra otel -- pytest tests/test_telemetry.py -m "not localstack" --cov=rtdp.telemetry --cov-branch --cov-report=xml
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+
   integration-localstack:
     name: integration tests (LocalStack S3)
     runs-on: ubuntu-latest

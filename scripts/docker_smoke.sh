@@ -6,7 +6,7 @@
 # check in tests/test_api.py. Used locally and by the CI build-image job (Stage E phase E4).
 #
 # Usage:  bash scripts/docker_smoke.sh
-# Env:    IMAGE (default rtdp:smoke), PORT (default 8000)
+# Env:    IMAGE (default rtdp:smoke), PORT (default 8000), SKIP_BUILD=1 (smoke a prebuilt image)
 
 set -euo pipefail
 
@@ -21,8 +21,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo ">> building image: $IMAGE"
-docker build -t "$IMAGE" .
+if [ "${SKIP_BUILD:-0}" = "1" ]; then
+  echo ">> SKIP_BUILD=1 — smoking prebuilt image: $IMAGE"
+else
+  echo ">> building image: $IMAGE"
+  docker build -t "$IMAGE" .
+fi
 
 echo ">> seeding a table on the file:// backend (so /health can report ok)"
 docker run --rm -v "$DATA_VOL":/data \

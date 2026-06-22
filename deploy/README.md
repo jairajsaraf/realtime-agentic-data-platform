@@ -57,3 +57,31 @@ not overlap a `stream` commit.
 
 > Note: actual provisioning (host, MinIO volumes, secrets manager, observability backend) is a
 > later, separately-gated step. These files only describe how to run the stack locally / on a host.
+
+## CI/CD
+
+GitHub Actions (`.github/workflows/ci.yml`) validates the image and, on `main`, publishes it.
+Image validation is kept separate from publishing, and publishing separate from deployment.
+
+- **`docker-smoke`** (every push + PR) — builds the image and runs `scripts/docker_smoke.sh`
+  (file:// synthetic seed → `rtdp serve` → `/health` 200) plus a `docker compose config`
+  validation. Permissions: `contents: read` only. **Never logs in to or pushes to GHCR; needs no
+  secrets** — so pull-request validation requires no cloud credentials.
+- **`publish-image`** (push to `main` only; needs lint/unit + LocalStack integration + smoke) —
+  builds and pushes `ghcr.io/<owner>/<repo>:<sha>` and `:latest` using the built-in
+  `GITHUB_TOKEN` (`packages: write`). No external/cloud secret.
+- **`deploy`** (push to `main` only; needs all of the above; `environment: production`) — a
+  **no-op placeholder** today; it performs no real deployment.
+
+### Required GitHub settings (manual; not automated here)
+- Create a **`production` Environment** with **required reviewers** (optionally restrict
+  deployment branches to `main`) before any real deploy step is added.
+- GHCR packages are **private by default**; make the package public only if the demo image
+  should be anonymously pullable.
+- No repository secrets are required beyond the existing `CODECOV_TOKEN`.
+
+### Enabling a real deploy (separately approved)
+The real mechanism (e.g. SSH to the host + `docker compose pull && docker compose up -d`) is
+intentionally **not** wired. To enable it later: configure the `production` environment, add
+`DEPLOY_SSH_HOST`, `DEPLOY_SSH_USER`, `DEPLOY_SSH_KEY`, and `DEPLOY_PATH` as environment secrets,
+and replace the placeholder step in the `deploy` job. Until then, deployment stays manual/gated.

@@ -8,6 +8,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege by default; jobs widen scope only where needed (publish-image: packages: write).
+permissions:
+  contents: read
+
 jobs:
   test:
     name: lint + unit tests (file://)
@@ -63,3 +67,68 @@ jobs:
           echo "LocalStack did not become ready" >&2; exit 1
       - name: Integration tests
         run: uv run pytest -m localstack
+
+
+  # Build the image and assert GET /health == 200 on the file:// synthetic backend.
+  # Runs on every push + PR. Never logs in to or pushes to GHCR; needs no secrets.
+  docker-smoke:
+    name: docker image build + /health smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t rtdp:ci .
+      - name: Container /health smoke (file:// synthetic)
+        env:
+          IMAGE: rtdp:ci
+          SKIP_BUILD: "1"
+        run: bash scripts/docker_smoke.sh
+      - name: Validate deploy compose config
+        env:
+          MINIO_ROOT_USER: ci
+          MINIO_ROOT_PASSWORD: ci-placeholder
+        run: docker compose -f deploy/docker-compose.yml config --quiet
+
+  # Publish the image to GHCR on main only, using the built-in GITHUB_TOKEN (no external secret).
+  publish-image:
+    name: publish image (GHCR)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, integration-localstack, docker-smoke]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve lowercase image ref
+        id: ref
+        run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - name: Build and tag
+        run: docker build -t "${{ steps.ref.outputs.image }}:${{ github.sha }}" -t "${{ steps.ref.outputs.image }}:latest" .
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Push image tags
+        run: |
+          docker push "${{ steps.ref.outputs.image }}:${{ github.sha }}"
+          docker push "${{ steps.ref.outputs.image }}:latest"
+
+  # Gated, no-op deploy placeholder. Performs NO real deployment. Bound to the protected
+  # `production` environment (configure required reviewers) and gated behind all prior jobs.
+  deploy:
+    name: deploy (gated)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, integration-localstack, docker-smoke, publish-image]
+    permissions:
+      contents: read
+    environment: production
+    steps:
+      - name: Gated deploy placeholder (no-op)
+        run: |
+          echo "Deploy is intentionally gated and not wired yet (no-op)."
+          echo "To enable a real deploy (separately approved):"
+          echo "  1. Configure the 'production' environment with required reviewers."
+          echo "  2. Add environment secrets: DEPLOY_SSH_HOST, DEPLOY_SSH_USER, DEPLOY_SSH_KEY, DEPLOY_PATH."
+          echo "  3. Replace this step with the deploy commands."

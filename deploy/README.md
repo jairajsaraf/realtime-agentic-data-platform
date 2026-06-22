@@ -67,6 +67,9 @@ Image validation is kept separate from publishing, and publishing separate from 
   (file:// synthetic seed → `rtdp serve` → `/health` 200) plus a `docker compose config`
   validation. Permissions: `contents: read` only. **Never logs in to or pushes to GHCR; needs no
   secrets** — so pull-request validation requires no cloud credentials.
+- **`telemetry-otel`** (every push + PR) — installs the optional `[otel]` extra and runs the
+  telemetry suite with coverage so the OpenTelemetry-enabled branches are measured. Permissions:
+  `contents: read`; reuses the existing `CODECOV_TOKEN`; the tests never export spans.
 - **`publish-image`** (push to `main` only; needs lint/unit + LocalStack integration + smoke) —
   builds and pushes `ghcr.io/<owner>/<repo>:<sha>` and `:latest` using the built-in
   `GITHUB_TOKEN` (`packages: write`). No external/cloud secret.

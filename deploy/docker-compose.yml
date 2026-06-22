@@ -21,8 +21,9 @@ x-rtdp-env: &rtdp-env
   RTDP_STORAGE_BACKEND: ${RTDP_STORAGE_BACKEND:-file}
   RTDP_LOCAL_WAREHOUSE_DIR: /data/warehouse
   RTDP_CATALOG_DB_PATH: /data/warehouse/catalog.db   # catalog is local SQLite in every backend
-  # S3-compatible (MinIO/AWS) — used only when RTDP_STORAGE_BACKEND=aws:
-  RTDP_S3_ENDPOINT_URL: ${RTDP_S3_ENDPOINT_URL:-http://minio:9000}
+  # S3-compatible (MinIO/AWS) — used only when RTDP_STORAGE_BACKEND=aws. Uses `-` (not `:-`) so an
+  # explicitly empty RTDP_S3_ENDPOINT_URL passes through unchanged (real AWS); unset → MinIO default.
+  RTDP_S3_ENDPOINT_URL: ${RTDP_S3_ENDPOINT_URL-http://minio:9000}
   RTDP_S3_BUCKET: ${RTDP_S3_BUCKET:-lakehouse}
   RTDP_AWS_ACCESS_KEY_ID: ${RTDP_AWS_ACCESS_KEY_ID:-}
   RTDP_AWS_SECRET_ACCESS_KEY: ${RTDP_AWS_SECRET_ACCESS_KEY:-}
@@ -86,9 +87,12 @@ services:
     image: minio/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
-      # No secrets committed: these MUST be supplied at run time (Doppler / a local .env).
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER (e.g. via Doppler or a local .env)}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD (e.g. via Doppler or a local .env)}
+      # No secrets committed. Empty defaults (`:-`) keep the no-secrets file:// path runnable —
+      # Compose interpolates the whole file before profile filtering, so a required `:?` here would
+      # break `docker compose up` even without the `s3` profile. For the `s3` profile these MUST be
+      # supplied at run time (Doppler / a local .env); MinIO refuses to start with empty root creds.
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
     expose:
       - "9000"                         # S3 API — internal network only (reached as minio:9000)
     ports:
@@ -105,8 +109,10 @@ services:
     depends_on:
       - minio
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER (e.g. via Doppler or a local .env)}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD (e.g. via Doppler or a local .env)}
+      # Empty defaults as above: required for the `s3` profile (set via Doppler / a local .env),
+      # but must not block the default file:// path at Compose load time.
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
       RTDP_S3_BUCKET: ${RTDP_S3_BUCKET:-lakehouse}
     entrypoint:
       - /bin/sh

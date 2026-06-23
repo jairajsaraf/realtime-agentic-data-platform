@@ -1,0 +1,48 @@
+# Keep the build context small and ensure no local state / secrets / planning docs ever
+# enter an image layer. The Dockerfile copies only pyproject.toml, uv.lock, src/, README.md.
+
+# VCS / CI
+.git/
+.github/
+
+# Local planning / agent / primer docs (kept untracked; never shipped)
+CLAUDE.md
+.claude/
+COMPILER_PRIMER.md
+*_SPEC.md
+SESSION_HANDOFF.md
+_agent_eval_report*.json
+
+# Secrets / environment
+.env
+.env.*
+
+# Local state: warehouses, catalog DBs, LocalStack volume
+_warehouse/
+_demo/
+.localstack/
+*.db
+
+# Python caches / build artifacts / virtualenv
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Not needed in the runtime image
+tests/
+deploy/
+docker-compose.yml
+Makefile
+RUNBOOK.md
+
+# OS cruft
+.DS_Store
+Thumbs.db

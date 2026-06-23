@@ -38,6 +38,39 @@ def test_aws_backend_has_no_endpoint():
     assert props["s3.access-key-id"] == "test"
 
 
+def test_aws_backend_uses_explicit_endpoint():
+    # The `aws` backend can target an S3-compatible store (e.g. self-hosted MinIO) when an
+    # endpoint is explicitly set, while still writing to an s3:// warehouse.
+    s = _settings(storage_backend="aws", s3_endpoint_url="http://minio:9000", s3_bucket="lake")
+    props = s.catalog_properties()
+    assert props["s3.endpoint"] == "http://minio:9000"
+    assert props["warehouse"] == "s3://lake/warehouse"
+    assert props["s3.access-key-id"] == "test"
+
+
+def test_aws_backend_endpoint_from_env(monkeypatch):
+    # The deployed MinIO path sets RTDP_S3_ENDPOINT_URL via env (e.g. Doppler-injected).
+    monkeypatch.setenv("RTDP_STORAGE_BACKEND", "aws")
+    monkeypatch.setenv("RTDP_S3_ENDPOINT_URL", "http://minio:9000")
+    s = _settings()
+    assert s.catalog_properties()["s3.endpoint"] == "http://minio:9000"
+
+
+def test_aws_backend_empty_endpoint_stays_real_aws(monkeypatch):
+    # An explicitly empty endpoint must not break real AWS (no s3.endpoint emitted).
+    monkeypatch.setenv("RTDP_STORAGE_BACKEND", "aws")
+    monkeypatch.setenv("RTDP_S3_ENDPOINT_URL", "")
+    s = _settings()
+    assert "s3.endpoint" not in s.catalog_properties()
+
+
+def test_localstack_endpoint_unchanged():
+    # LocalStack behavior is preserved: the endpoint is always emitted (default or override).
+    assert _settings().catalog_properties()["s3.endpoint"] == "http://localhost:4566"
+    s = _settings(storage_backend="localstack", s3_endpoint_url="http://ls:4566")
+    assert s.catalog_properties()["s3.endpoint"] == "http://ls:4566"
+
+
 def test_env_override(monkeypatch):
     monkeypatch.setenv("RTDP_STORAGE_BACKEND", "aws")
     monkeypatch.setenv("RTDP_S3_BUCKET", "envbucket")

@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from .. import query
+from .. import query, telemetry
 from ..catalog import build_catalog
 from ..config import Settings
 from .routes import router
@@ -56,4 +56,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
 
     app.include_router(router)
+
+    # Observability (Stage E): configure the rtdp logger and, only when RTDP_OTEL_ENABLED is set
+    # AND the optional [otel] extra is installed, instrument the app. Both are no-ops otherwise.
+    telemetry.configure_logging(app.state.settings)
+    telemetry.instrument_fastapi(app, app.state.settings)
     return app

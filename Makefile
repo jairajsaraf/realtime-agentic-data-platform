@@ -1,4 +1,4 @@
-.PHONY: setup info ingest demos test test-all lint fmt localstack-up localstack-down reset clean
+.PHONY: setup info ingest demos test test-all lint fmt localstack-up localstack-down docker-build compose-up compose-down smoke reset clean
 
 # Common commands mirrored for Linux/CI. On Windows, run the `uv run ...` lines directly.
 
@@ -31,6 +31,21 @@ localstack-up:
 
 localstack-down:
 	docker compose down
+
+# Stage E containerization (single image, multiple entrypoints).
+docker-build:
+	docker build -t rtdp:local .
+
+# Deployed-host topology (read API + stream loop on file://). Add --build to rebuild.
+compose-up:
+	docker compose -f deploy/docker-compose.yml up -d
+
+compose-down:
+	docker compose -f deploy/docker-compose.yml down
+
+# Build the image and assert GET /health returns 200 (no secrets / network / MinIO).
+smoke:
+	bash scripts/docker_smoke.sh
 
 # Clear local lakehouse state so the SQLite catalog can't point at S3 metadata
 # that `docker compose down` already discarded (avoids FileNotFoundError on a

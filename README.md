@@ -24,7 +24,8 @@ API as its tools (**Stage D**).
 | **Stage 2A — read-only serving layer** | ✅ Complete | A FastAPI service over the bronze table: typed flight reads, geographic bounding-box, interval aggregations, and Iceberg time-travel, behind an auto-generated OpenAPI schema. |
 | **Stage 2B — incremental micro-batch ingestion** | ✅ Complete | A scheduled `rtdp stream` loop that polls a source and appends micro-batches via the existing writer (within-batch dedup, skip-empty, read-time latest-state view, opt-in snapshot expiration). Near-real-time micro-batch — **not** true streaming. |
 | **Stage D — agentic layer** | ✅ Complete | A natural-language agent (`rtdp agent`) that answers flight questions and diagnoses data quality by calling the Stage 2A HTTP API as tools. Strictly read-only and human-in-the-loop — proposes remediations, never mutates. Deterministic fake-LLM tests; opt-in live eval harness. |
-| **Later stages** | ⬜ Planned | True streaming (Kafka/Flink), RAG/vector search, fine-tuning, orchestration, dashboards, cloud deployment. |
+| **Stage E — productionization & observability** | 🚧 In progress | One Docker image (multi-entrypoint: serve/stream/maintain/agent), a single-host Docker Compose topology (file:// or self-hosted MinIO via the `aws` backend), an optional telemetry boundary (`[otel]` extra, no-op by default), and a CI/CD pipeline that smoke-tests the image, publishes to GHCR on `main`, and gates a **no-op** `deploy`. **Ops-only and additive** — no new data features or endpoints; deployment is a protected-environment no-op (no provisioning has been done). |
+| **Later stages** | ⬜ Planned | True streaming (Kafka/Flink), RAG/vector search, fine-tuning, orchestration, dashboards, real-AWS / multi-host (Kubernetes) deployment. |
 
 ## Architecture
 
@@ -398,6 +399,93 @@ tool-call correctness, latency, and token usage against a real model. See `RUNBO
 
 ---
 
+## Stage E — productionization & observability
+
+Stage E packages the existing surfaces for an always-on, monitored **single-host** demo. It is
+**ops-only and additive**: no data-plane, schema, writer, DQ, or query change, and **no new API
+endpoint** (in particular **no `/metrics`**, `/agent`, `/flights/latest`, or `/dq/*`). The deployed
+demo serves **synthetic data only** — never live OpenSky.
+
+### One image, multiple entrypoints
+
+A single Docker image (`Dockerfile`) wraps the `rtdp` CLI; the container command selects the runtime:
+
+| Command | Role |
+|---|---|
+| `rtdp serve` | read-only API (the only externally exposed service) |
+| `rtdp stream` | the sole writer — one micro-batch snapshot per interval (synthetic source) |
+| `rtdp maintain expire-snapshots` | one-shot, metadata-only snapshot expiration |
+| `rtdp agent "<q>"` | on-demand agent question (external, config-driven LLM) |
+
+```bash
+docker build -t rtdp:local .
+bash scripts/docker_smoke.sh           # build → seed (file://) → serve → GET /health == 200
+```
+
+### Single-host topology (Docker Compose)
+
+`deploy/docker-compose.yml` runs `api` + `stream` (and a one-shot `maintain` profile) from the one
+image, sharing a single volume. The catalog stays **local SQLite on that shared volume in every
+backend**, so the host is **single-writer** — run one `stream` replica and schedule `maintain` not
+to overlap it.
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build            # file:// (no secrets)
+docker compose -f deploy/docker-compose.yml --profile s3 up -d       # self-hosted MinIO
+```
+
+Object storage is config-driven: set `RTDP_STORAGE_BACKEND=aws` and point `RTDP_S3_ENDPOINT_URL`
+at the MinIO service to use an S3-compatible store (real AWS stays the default when no endpoint is
+set — see `deploy/README.md`). The MinIO console binds to `127.0.0.1` only.
+
+### Telemetry boundary (no-op by default)
+
+`rtdp.telemetry` is the single observability seam: **stdlib structured logging** always, and
+**OpenTelemetry tracing only when `RTDP_OTEL_ENABLED=true` AND the optional `[otel]` extra is
+installed**. The default install pulls in **no** OpenTelemetry packages, so CI and the default
+runtime stay dependency-free; if the extra is missing while enabled, the boundary logs a warning
+and degrades to no-op (the app always boots). Nothing is exported until spans are produced.
+
+```bash
+uv sync --extra otel       # opt in to the OpenTelemetry SDK + OTLP exporter
+```
+
+Settings (all under the existing `RTDP_*` / `Settings` surface): `RTDP_OTEL_ENABLED`,
+`RTDP_OTEL_SERVICE_NAME`, `RTDP_OTEL_EXPORTER_OTLP_ENDPOINT` (provider-agnostic — point it at a
+collector or the Datadog Agent), `RTDP_LOG_FORMAT` (`text`|`json`), `RTDP_LOG_LEVEL`. There is **no
+`/metrics` scrape endpoint**.
+
+### CI/CD
+
+`.github/workflows/ci.yml` keeps image validation, publishing, and deployment separate and
+least-privilege (top-level `permissions: contents: read`):
+
+- **`docker-smoke`** (every push + PR) — builds the image and asserts `/health == 200` on the
+  file:// synthetic backend, plus `docker compose config` validation. **No secrets, no GHCR
+  login/push** — pull-request validation needs no cloud credentials.
+- **`telemetry-otel`** (every push + PR) — runs the telemetry suite under the `[otel]` extra and
+  uploads coverage so the OTel-enabled branches are measured. Key-free.
+- **`publish-image`** (push to `main` only) — builds and pushes `ghcr.io/<owner>/<repo>:<sha>` and
+  `:latest` using the built-in `GITHUB_TOKEN` (`packages: write`). No external secret.
+- **`deploy`** (push to `main` only; `environment: production`) — a **no-op placeholder**. Real
+  deployment is intentionally not wired; the protected `production` environment and its required
+  reviewers are configured manually in repo settings, and a real deploy is separately approved.
+
+### Secrets & the agent LLM
+
+Runtime config flows through `RTDP_*` settings; secrets are injected at run time (**Doppler**
+preferred for a host, or a local gitignored `.env`) — **no keys are committed and there is no
+Python Doppler dependency**. The agent's model stays **external and config-driven** via the
+OpenAI-compatible boundary (NVIDIA Build/NIM is the intended option) — **not** self-hosted, no
+GPU/inference provisioning, and **neither CI nor `/health` ever depends on it**.
+
+> Stage E status: E1 (image) → E2 (telemetry boundary) → E3 (deploy assets) → E4 (CI/CD scaffold)
+> → E5 (docs) are in place. **No host, MinIO volume, secrets manager, or observability backend has
+> been provisioned**; the `production` environment, deploy secrets, and the real deploy mechanism
+> are deferred and separately gated.
+
+---
+
 ## Testing
 
 ```bash
@@ -412,9 +500,11 @@ integration job against LocalStack S3. See `RUNBOOK.md` for a step-by-step fresh
 
 **Not built yet (intentionally):** true streaming (Kafka/Flink), RAG / vector search, model
 fine-tuning, autonomous remediation (the Stage D agent *proposes*; a human applies), orchestration,
-dashboards, real cloud deployment, production IAM, and data-file compaction. The table/partition
-design anticipates continued appends without a rewrite, and the read API doubles as the agent's
-tool surface.
+dashboards, **real provisioned cloud / multi-host (Kubernetes) deployment**, production IAM, and
+data-file compaction. (Stage E adds **single-host containerization + a gated CI/CD scaffold**, but
+performs no provisioning and keeps `deploy` a no-op — see [Stage E](#stage-e--productionization--observability).)
+The table/partition design anticipates continued appends without a rewrite, and the read API
+doubles as the agent's tool surface.
 
 **Direction for later stages (not commitments):**
 
@@ -422,5 +512,5 @@ tool surface.
   micro-batch loop.
 - **Retrieval (RAG) / vector search** and **richer agent autonomy** beyond the current read-only,
   human-in-the-loop agent.
-- **Orchestration & dashboards**, then **cloud deployment** (real AWS S3 is already a config-only
-  swap).
+- **Orchestration & dashboards**, then **real provisioned / multi-host deployment** beyond Stage
+  E's single-host containerized demo (real AWS S3 is already a config-only swap).

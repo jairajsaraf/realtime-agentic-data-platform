@@ -232,7 +232,69 @@ coordinates/altitude, nulls, duplicate state keys) from the rows the API returns
 
 ---
 
-## H. Cleanup
+## H. Stage E — containerized single-host topology & observability (ops-only)
+
+Stage E runs the existing surfaces from **one Docker image** on a single host, with an optional
+telemetry boundary and a CI/CD scaffold. It is **additive and ops-only** — no data-plane change,
+no new endpoint (incl. **no `/metrics`**), and the public demo serves **synthetic data only**.
+
+### 1. Build the image and smoke it (no secrets / network / MinIO)
+
+```powershell
+docker build -t rtdp:local .
+# Git Bash on Windows rewrites container paths; disable MSYS path conversion for the smoke script:
+$env:MSYS_NO_PATHCONV="1"; $env:MSYS2_ARG_CONV_EXCL="*"
+bash scripts/docker_smoke.sh                       # build -> seed (file://) -> serve -> /health 200
+```
+Success: `OK: /health returned 200` then a JSON health body. The same image exposes every runtime
+as a command: `serve` (read API), `stream` (micro-batch writer), `maintain expire-snapshots`
+(one-shot), `agent "<q>"` (on-demand). `SKIP_BUILD=1` smokes a prebuilt image.
+
+### 2. Single-host Docker Compose topology
+
+```powershell
+docker compose -f deploy/docker-compose.yml up -d --build           # file:// (default; no secrets)
+docker compose -f deploy/docker-compose.yml --profile s3 up -d      # self-hosted MinIO (aws backend)
+```
+`api` + `stream` share one volume; the API is at http://localhost:8000 (`/health` returns 503 until
+the first stream batch creates the table, then 200). For the MinIO path, set
+`RTDP_STORAGE_BACKEND=aws` and point `RTDP_S3_ENDPOINT_URL` at the MinIO service (real AWS stays the
+default when no endpoint is set). The catalog is **local SQLite on the shared volume** in every
+backend -> single-writer: keep one `stream` and schedule `maintain` not to overlap it. One-shot
+maintenance: `docker compose -f deploy/docker-compose.yml run --rm maintain`. See `deploy/README.md`.
+
+### 3. Telemetry boundary (no-op unless enabled AND installed)
+
+Logging is stdlib structured logging by default. OpenTelemetry tracing turns on only when
+`RTDP_OTEL_ENABLED=true` **and** the optional `[otel]` extra is installed; otherwise the boundary is
+a no-op (and degrades gracefully with a warning if enabled but the extra is absent).
+```powershell
+uv sync --extra otel                                    # opt in to the OTel SDK + OTLP exporter
+uv run --extra otel -- pytest tests/test_telemetry.py   # OTel-enabled branch tests
+```
+Settings (`RTDP_*`): `RTDP_OTEL_ENABLED`, `RTDP_OTEL_SERVICE_NAME`,
+`RTDP_OTEL_EXPORTER_OTLP_ENDPOINT` (provider-agnostic — a collector or the Datadog Agent),
+`RTDP_LOG_FORMAT` (`text`|`json`), `RTDP_LOG_LEVEL`. There is **no `/metrics` endpoint**.
+
+### 4. Secrets & the agent model
+
+Inject secrets at run time — **Doppler** (`doppler run -- docker compose ...`) or a local,
+gitignored `.env` (copy `deploy/.env.example`). No keys are committed; there is no Python Doppler
+dependency. The agent's LLM stays **external and config-driven** (`RTDP_AGENT_*`; NVIDIA Build/NIM
+intended) — not self-hosted, no GPU/inference provisioning, and **neither CI nor `/health` depends
+on it**.
+
+### 5. CI/CD (validate -> publish -> gated no-op deploy)
+
+`.github/workflows/ci.yml` (least-privilege; top-level `contents: read`): `docker-smoke` and
+`telemetry-otel` run on every push + PR with **no secrets**; `publish-image` pushes to GHCR via the
+built-in `GITHUB_TOKEN` on `main` only; `deploy` (push to `main`, `environment: production`) is a
+**no-op placeholder**. Provisioning the `production` environment + required reviewers and wiring a
+real deploy are manual and separately approved — **nothing has been provisioned**.
+
+---
+
+## I. Cleanup
 
 ```powershell
 docker compose down                   # stop + remove LocalStack (its S3 data is ephemeral)
@@ -259,6 +321,10 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
       read-time latest-state); `rtdp maintain expire-snapshots` bounds snapshot growth (metadata-only)
 - [ ] `rtdp agent "<q>"` answers via the read API with endpoint+snapshot citations; fake-LLM agent
       tests are green with no network/keys; the live eval harness is opt-in (never in CI)
+- [ ] Stage E: one Docker image with `serve`/`stream`/`maintain`/`agent` entrypoints; single-host
+      compose up; `bash scripts/docker_smoke.sh` returns `/health` 200; telemetry stays no-op unless
+      `RTDP_OTEL_ENABLED` + the `[otel]` extra; CI publishes to GHCR on `main` and `deploy` is a
+      gated no-op (no provisioning done)
 
 ## Known limitations
 
@@ -283,7 +349,13 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
   re-derived from API responses — bounded by the queried window, the API row limit, and available
   snapshots (Pandera WARN/FAIL history is not persisted). Live model calls are opt-in and
   config-driven (`RTDP_AGENT_*`); unit tests use a deterministic fake LLM.
+- **Stage E (ops-only):** single-host Docker topology with a **local SQLite catalog on the shared
+  volume** (single-writer; one `stream`). The telemetry boundary is **no-op unless** `RTDP_OTEL_ENABLED`
+  is set **and** the `[otel]` extra is installed; nothing is exported during tests, and there is **no
+  `/metrics` endpoint**. The deployed demo serves **synthetic data only**; the agent LLM is external/
+  config-driven (NVIDIA Build/NIM intended) and never gates CI or `/health`. `deploy` is a gated
+  no-op — **no host / MinIO volume / secrets manager / observability backend has been provisioned**.
 - **Out of scope:** true streaming (Kafka/Flink), RAG/vector search, fine-tuning, autonomous
-  remediation (the Stage D agent proposes; a human applies), orchestration, dashboards, real AWS
-  deployment, production IAM.
+  remediation (the Stage D agent proposes; a human applies), orchestration, dashboards, real
+  provisioned / multi-host (Kubernetes) deployment, production IAM.
 ```

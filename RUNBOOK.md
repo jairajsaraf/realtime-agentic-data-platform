@@ -284,13 +284,126 @@ dependency. The agent's LLM stays **external and config-driven** (`RTDP_AGENT_*`
 intended) — not self-hosted, no GPU/inference provisioning, and **neither CI nor `/health` depends
 on it**.
 
-### 5. CI/CD (validate -> publish -> gated no-op deploy)
+### 5. CI/CD (validate -> publish -> gated deploy)
 
 `.github/workflows/ci.yml` (least-privilege; top-level `contents: read`): `docker-smoke` and
 `telemetry-otel` run on every push + PR with **no secrets**; `publish-image` pushes to GHCR via the
 built-in `GITHUB_TOKEN` on `main` only; `deploy` (push to `main`, `environment: production`) is a
-**no-op placeholder**. Provisioning the `production` environment + required reviewers and wiring a
-real deploy are manual and separately approved — **nothing has been provisioned**.
+**real, gated SSH deploy** — protected by the `production` environment (required reviewers) and run
+only on manual approval. Provisioning the host + secrets and approving the first deploy are the
+separately-gated E6.2 step — **nothing has been provisioned or deployed in E6.1**.
+
+---
+
+## Stage E6 — go-live (gated)
+
+**Honest status:** this repo prep is **E6.1 — repo-side automation and docs only** (Caddy/Datadog
+compose profiles, host bootstrap + deploy scripts, the `[otel]` image build path, and a real but
+**gated** SSH deploy job). **Nothing is provisioned and there is no live demo URL yet.** Provisioning +
+first deploy is **E6.2**, observability go-live is **E6.3**, docs/clean is **E6.4** — each separately
+approved. The public demo, when it exists, serves **synthetic data only**.
+
+### Architecture (target, after E6.2)
+
+```
+                         Internet
+                            │  DNS A-record: demo.<you>.me -> droplet IP
+                            ▼
+                 ┌────────────────────────┐  inbound (UFW): only 22 / 80 / 443
+                 │ DigitalOcean Ubuntu LTS │
+                 │ droplet (no GPU)        │
+                 │                         │
+                 │  ┌───────────────┐      │  automatic Let's Encrypt TLS
+                 │  │ Caddy  (edge) │◀─────┼── :80/:443
+                 │  └──────┬────────┘      │     reverse_proxy api:8000
+                 │         ▼               │  (compose net; API bound to 127.0.0.1)
+                 │  ┌───────────────┐      │
+                 │  │ api  (serve)  │      │
+                 │  └──────┬────────┘      │
+                 │         │ reads         │
+                 │  ┌──────┴────────┐      │  appends micro-batches (synthetic only)
+                 │  │ stream        │──────┼─▶ shared volume: SQLite catalog + warehouse
+                 │  └───────────────┘      │            │
+                 │  ┌───────────────┐      │            ▼
+                 │  │ MinIO  (s3)   │◀─────┼── Iceberg data (aws backend, RTDP_S3_ENDPOINT_URL)
+                 │  └───────────────┘      │
+                 │  ┌───────────────┐      │  OTLP gRPC :4317 (internal only)
+                 │  │ datadog-agent │◀─────┼── api/stream traces (when RTDP_OTEL_ENABLED=true)
+                 │  └──────┬────────┘      │
+                 └─────────┼───────────────┘
+                           ▼ (E6.3)            Doppler injects RTDP_* / DD_API_KEY on host
+                        Datadog                GitHub `production` env secrets = SSH deploy creds only
+   deploy: push main -> CI publish image -> [manual approve] -> SSH -> host_deploy.sh (pull/up/health)
+   external (optional): agent LLM via NVIDIA NIM (config-only); /health + CI never depend on it
+```
+
+### E6.2 — provisioning + first deploy (manual; human-in-the-loop)
+
+1. **Claim Student Pack offers** (verify availability first): DigitalOcean credit, Datadog free Pro,
+   Doppler free Team, Namecheap free `.me`. (NVIDIA Build/NIM optional, agent-only.)
+2. **Create one small Ubuntu LTS droplet** (smallest viable size, no GPU); note its public IP.
+3. **DNS:** at Namecheap, add an **A-record** for your `.me` host → the droplet IP; wait for it to
+   resolve. (If the domain can't be claimed, **stop and ask** before any fallback.)
+4. **Doppler:** create a project + config; add `RTDP_*` (storage/MinIO/AWS, OTel endpoint),
+   `DD_API_KEY`, `DD_SITE`, `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`, `RTDP_PUBLIC_HOSTNAME`,
+   `RTDP_IMAGE`, `RTDP_API_BIND=127.0.0.1`, `COMPOSE_PROFILES=s3,edge,observability`. Create a
+   **service token** for the host.
+5. **GitHub `production` environment:** create it, add **required reviewers**, restrict to `main`.
+6. **Add `production` environment secrets:** `DEPLOY_SSH_HOST` (droplet host/IP), `DEPLOY_SSH_USER`
+   (`deploy`), `DEPLOY_SSH_KEY` (the deploy user's **private** key), `DEPLOY_SSH_PATH` (deploy dir,
+   e.g. `/opt/rtdp`).
+7. **Bootstrap the host:** copy the repo to the host, then `sudo bash deploy/bootstrap_host.sh`; add
+   your SSH **public** key to `deploy`'s `authorized_keys`; configure the Doppler service token in the
+   `deploy` user's environment.
+8. **Approve the first deploy:** push to `main`, then **Actions → run → Review deployments → Approve**.
+   The job SSHes in and runs `host_deploy.sh`; it **fails if `/health` doesn't pass**.
+9. Browse `https://<your-domain>/health` and `/docs` once DNS + Let's Encrypt settle.
+
+> **Host-key caveat:** the deploy job's `ssh-keyscan` is **trust-on-first-use bootstrapping, not
+> out-of-band verification**. During E6.2, capture the droplet's host key from the DigitalOcean console
+> (or the first interactive SSH login) and **verify/pin** it, so the first CI connection can't be
+> spoofed.
+
+### Local verification (no cloud, no real keys)
+
+```powershell
+docker compose -f deploy/docker-compose.yml config                       # default renders, key-free
+docker compose -f deploy/docker-compose.yml `
+  --profile s3 --profile edge --profile observability config             # all profiles render
+bash -n deploy/bootstrap_host.sh deploy/host_deploy.sh                   # shell syntax (Git Bash)
+# Optional bring-up (file:// synthetic + Caddy):
+docker compose -f deploy/docker-compose.yml --profile edge up -d
+curl -k https://localhost/health        # Caddy internal CA (or: curl http://localhost:8000/health)
+docker compose -f deploy/docker-compose.yml --profile edge down
+```
+Caddy local TLS uses an internal CA, so `-k` is expected. The Datadog Agent needs a real `DD_API_KEY`,
+so leave the `observability` profile **out** of local bring-up (or expect the Agent to error) — that is
+an E6.3 concern.
+
+### Teardown & cost control
+
+- **Stop services (keep host):** on the host, `doppler run -- docker compose -f
+  deploy/docker-compose.yml down` (add `-v` to also drop volumes).
+- **Destroy the droplet** (stops all burn — the single biggest cost lever): DigitalOcean dashboard →
+  Droplet → Destroy.
+- **Prune images/volumes:** `docker system prune -a` and `docker volume prune` on the host.
+- **Remove DNS:** delete the Namecheap A-record.
+- **Remove deploy access:** delete the GitHub `production` environment secrets, rotate the
+  `DEPLOY_SSH_KEY`, and remove the deploy user's authorized key if retiring the host.
+- **Watch credit burn:** the DigitalOcean **Billing** page; pick the **smallest viable droplet**.
+  *(Exact monthly cost — fill in from DigitalOcean's official pricing page when sizing; not asserted
+  here.)*
+
+### Security notes
+
+- **Synthetic data only**; **no live OpenSky** in CI or the public demo.
+- **No secrets in the repo** — SSH creds live in the GitHub `production` environment; `RTDP_*` and
+  `DD_API_KEY` live in Doppler.
+- **Caddy handles TLS** (automatic Let's Encrypt); the **Namecheap bundled SSL certificate is unused**.
+- **`/health` and CI never depend on** NVIDIA, Datadog, Doppler, MinIO, or the internet.
+- **Datadog/observability requires a real `DD_API_KEY`** and is only wired live in **E6.3**.
+- The API's port 8000 is bound to **127.0.0.1** on the host (Caddy fronts it); UFW allows only
+  22/80/443 inbound.
 
 ---
 

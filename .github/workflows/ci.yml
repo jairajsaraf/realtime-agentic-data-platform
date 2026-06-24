@@ -131,8 +131,15 @@ jobs:
       - name: Resolve lowercase image ref
         id: ref
         run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      # The deployed image carries the optional [otel] extra so telemetry is *available* on the
+      # host. It stays no-op unless RTDP_OTEL_ENABLED=true at run time; the default `docker-smoke`
+      # build (no build-arg) still validates the lean, dependency-free image.
       - name: Build and tag
-        run: docker build -t "${{ steps.ref.outputs.image }}:${{ github.sha }}" -t "${{ steps.ref.outputs.image }}:latest" .
+        run: |
+          docker build \
+            --build-arg RTDP_INSTALL_EXTRAS=otel \
+            -t "${{ steps.ref.outputs.image }}:${{ github.sha }}" \
+            -t "${{ steps.ref.outputs.image }}:latest" .
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Push image tags
@@ -140,8 +147,13 @@ jobs:
           docker push "${{ steps.ref.outputs.image }}:${{ github.sha }}"
           docker push "${{ steps.ref.outputs.image }}:latest"
 
-  # Gated, no-op deploy placeholder. Performs NO real deployment. Bound to the protected
-  # `production` environment (configure required reviewers) and gated behind all prior jobs.
+  # Real, gated deploy. Runs ONLY on a push to `main`, behind the protected `production`
+  # environment (configure required reviewers there for manual approval), and only after the image
+  # is published. Uses raw OpenSSH — no third-party action ever handles the key: the private key is
+  # written to a 0600 temp file, the host key is pinned via ssh-keyscan, and the sole remote command
+  # is the reviewed host script (deploy/host_deploy.sh), which runs `docker compose pull && up -d`
+  # plus a post-deploy /health check and exits non-zero on failure. Secrets come from the
+  # `production` environment and are never echoed.
   deploy:
     name: deploy (gated)
     runs-on: ubuntu-latest
@@ -151,10 +163,30 @@ jobs:
       contents: read
     environment: production
     steps:
-      - name: Gated deploy placeholder (no-op)
+      - name: Deploy over SSH (host runs compose pull + up + /health check)
+        env:
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_PATH: ${{ secrets.DEPLOY_SSH_PATH }}
         run: |
-          echo "Deploy is intentionally gated and not wired yet (no-op)."
-          echo "To enable a real deploy (separately approved):"
-          echo "  1. Configure the 'production' environment with required reviewers."
-          echo "  2. Add environment secrets: DEPLOY_SSH_HOST, DEPLOY_SSH_USER, DEPLOY_SSH_KEY, DEPLOY_PATH."
-          echo "  3. Replace this step with the deploy commands."
+          set -euo pipefail
+          umask 077
+          key_file="$(mktemp)"
+          known_hosts="$(mktemp)"
+          trap 'rm -f "$key_file" "$known_hosts"' EXIT
+          # Private key -> 0600 temp file. mktemp already creates it 0600 under umask 077; chmod is
+          # explicit. The key is read from the env (masked) and never printed.
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          # Pin the host identity so the first connection can't be MITM'd.
+          ssh-keyscan -H "$DEPLOY_SSH_HOST" > "$known_hosts"
+          # Non-interactive, strict host-key checking against the pinned known_hosts; only our key.
+          # The single remote command is the reviewed host deploy script.
+          ssh -i "$key_file" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" \
+            "$DEPLOY_SSH_USER@$DEPLOY_SSH_HOST" \
+            "bash \"$DEPLOY_SSH_PATH/deploy/host_deploy.sh\""

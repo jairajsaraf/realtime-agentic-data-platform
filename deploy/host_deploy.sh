@@ -37,6 +37,11 @@ fi
 # `pull` and `up` invocations see the same set.
 export COMPOSE_PROFILES="${COMPOSE_PROFILES:-s3,edge,observability}"
 
+# Fail closed: on the deploy path Caddy (the `edge` profile) fronts the API, so port 8000 must never
+# be published publicly. Default the host bind to loopback unless explicitly overridden — a missing
+# env var must not expose 8000 (Docker publishes past UFW). Caddy still reaches the API as api:8000.
+export RTDP_API_BIND="${RTDP_API_BIND:-127.0.0.1}"
+
 # Required tooling.
 for tool in docker curl; do
   if ! command -v "${tool}" >/dev/null 2>&1; then

@@ -130,6 +130,9 @@ Image validation is kept separate from publishing, and publishing separate from 
   to `main`. The deploy job waits for a reviewer's approval before it runs.
 - Add the `production` **environment secrets**: `DEPLOY_SSH_HOST`, `DEPLOY_SSH_USER`,
   `DEPLOY_SSH_KEY` (the private key), `DEPLOY_SSH_PATH` (the repo/deploy path on the host).
+- **Recommended:** also add `DEPLOY_SSH_KNOWN_HOSTS` — the host's pinned `known_hosts` entry. When
+  set, the deploy verifies the host key against it; otherwise it falls back to in-band `ssh-keyscan`
+  (trust-on-first-use) with a warning. Capture/pin it out-of-band in E6.2.
 - GHCR packages are **private by default**; make the package public only if the demo image should be
   anonymously pullable (otherwise ensure the host can authenticate to pull it).
 - No other repository secrets are required beyond the existing `CODECOV_TOKEN`.

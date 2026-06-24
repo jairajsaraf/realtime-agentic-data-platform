@@ -351,7 +351,8 @@ approved. The public demo, when it exists, serves **synthetic data only**.
 5. **GitHub `production` environment:** create it, add **required reviewers**, restrict to `main`.
 6. **Add `production` environment secrets:** `DEPLOY_SSH_HOST` (droplet host/IP), `DEPLOY_SSH_USER`
    (`deploy`), `DEPLOY_SSH_KEY` (the deploy user's **private** key), `DEPLOY_SSH_PATH` (deploy dir,
-   e.g. `/opt/rtdp`).
+   e.g. `/opt/rtdp`), and **`DEPLOY_SSH_KNOWN_HOSTS`** (the droplet's pinned `known_hosts` line — see
+   the host-key caveat below).
 7. **Bootstrap the host:** copy the repo to the host, then `sudo bash deploy/bootstrap_host.sh`; add
    your SSH **public** key to `deploy`'s `authorized_keys`; configure the Doppler service token in the
    `deploy` user's environment.
@@ -359,10 +360,11 @@ approved. The public demo, when it exists, serves **synthetic data only**.
    The job SSHes in and runs `host_deploy.sh`; it **fails if `/health` doesn't pass**.
 9. Browse `https://<your-domain>/health` and `/docs` once DNS + Let's Encrypt settle.
 
-> **Host-key caveat:** the deploy job's `ssh-keyscan` is **trust-on-first-use bootstrapping, not
-> out-of-band verification**. During E6.2, capture the droplet's host key from the DigitalOcean console
-> (or the first interactive SSH login) and **verify/pin** it, so the first CI connection can't be
-> spoofed.
+> **Host-key caveat:** without a pinned key the deploy job falls back to `ssh-keyscan`, which is
+> **trust-on-first-use bootstrapping, not out-of-band verification**. During E6.2, capture the
+> droplet's host key from the DigitalOcean console (or the first interactive SSH login), verify it,
+> and store the `known_hosts` line as the **`DEPLOY_SSH_KNOWN_HOSTS`** secret so the deploy verifies
+> against it and the first CI connection can't be spoofed.
 
 ### Local verification (no cloud, no real keys)
 

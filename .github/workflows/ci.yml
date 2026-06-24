@@ -150,10 +150,11 @@ jobs:
   # Real, gated deploy. Runs ONLY on a push to `main`, behind the protected `production`
   # environment (configure required reviewers there for manual approval), and only after the image
   # is published. Uses raw OpenSSH — no third-party action ever handles the key: the private key is
-  # written to a 0600 temp file, the host key is pinned via ssh-keyscan, and the sole remote command
-  # is the reviewed host script (deploy/host_deploy.sh), which runs `docker compose pull && up -d`
-  # plus a post-deploy /health check and exits non-zero on failure. Secrets come from the
-  # `production` environment and are never echoed.
+  # written to a 0600 temp file; the host key is verified against the pinned DEPLOY_SSH_KNOWN_HOSTS
+  # secret when set (else a warned-about ssh-keyscan fallback); the deploy path + the approved
+  # commit's SHA-pinned image are passed as positional args to the reviewed host script
+  # (deploy/host_deploy.sh), which runs `docker compose pull && up -d` plus a post-deploy /health
+  # check and exits non-zero on failure. Secrets come from the `production` environment, never echoed.
   deploy:
     name: deploy (gated)
     runs-on: ubuntu-latest
@@ -169,6 +170,7 @@ jobs:
           DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_SSH_PATH: ${{ secrets.DEPLOY_SSH_PATH }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
           umask 077
@@ -179,14 +181,31 @@ jobs:
           # explicit. The key is read from the env (masked) and never printed.
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$key_file"
           chmod 600 "$key_file"
-          # Pin the host identity so the first connection can't be MITM'd.
-          ssh-keyscan -H "$DEPLOY_SSH_HOST" > "$known_hosts"
-          # Non-interactive, strict host-key checking against the pinned known_hosts; only our key.
-          # The single remote command is the reviewed host deploy script.
+          # Prefer an out-of-band pinned host key (DEPLOY_SSH_KNOWN_HOSTS). Fall back to in-band
+          # ssh-keyscan (trust-on-first-use) with a warning when it is unset — pin it in E6.2.
+          if [ -n "${DEPLOY_SSH_KNOWN_HOSTS:-}" ]; then
+            printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$known_hosts"
+          else
+            echo "WARNING: DEPLOY_SSH_KNOWN_HOSTS is unset; falling back to in-band ssh-keyscan (TOFU). Pin it in E6.2." >&2
+            ssh-keyscan -H "$DEPLOY_SSH_HOST" > "$known_hosts"
+          fi
+          # Deploy the APPROVED commit's immutable image (publish-image pushed :$GITHUB_SHA); never
+          # rely on :latest, which a queued/approved run could resolve to a newer commit.
+          image_ref="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]'):${GITHUB_SHA}"
+          # Pass the deploy path + image ref as POSITIONAL parameters ($1/$2) to a fixed remote script
+          # read from stdin (bash -s) — they are consumed as "$1"/"$2", never interpolated into a
+          # command, so a path containing quotes/backticks/$() is a literal value, not evaluated.
+          # printf %q only escapes them for safe transport through ssh's single-string re-parse. No eval.
           ssh -i "$key_file" \
             -o IdentitiesOnly=yes \
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$known_hosts" \
             "$DEPLOY_SSH_USER@$DEPLOY_SSH_HOST" \
-            "bash \"$DEPLOY_SSH_PATH/deploy/host_deploy.sh\""
+            "bash -s -- $(printf '%q' "$DEPLOY_SSH_PATH") $(printf '%q' "$image_ref")" <<'REMOTE'
+          set -euo pipefail
+          deploy_path="$1"
+          image_ref="$2"
+          cd "$deploy_path"
+          RTDP_IMAGE="$image_ref" bash deploy/host_deploy.sh
+          REMOTE

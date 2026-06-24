@@ -1,0 +1,16 @@
+# Caddy reverse proxy for the rtdp read API (Stage E6 edge).
+#
+# The site address is read from RTDP_PUBLIC_HOSTNAME at parse time ({$VAR:default} is Caddy's
+# env-substitution syntax). The default `localhost` keeps local testing simple: Caddy serves over
+# HTTPS using its own internal CA, so verify with `curl -k https://localhost/health` (the -k skips
+# the untrusted-CA check) or hit the API directly on http://localhost:8000/health.
+#
+# On the public host, set RTDP_PUBLIC_HOSTNAME to the real domain. Caddy then provisions and renews
+# a publicly trusted Let's Encrypt certificate automatically. That requires a public DNS A-record
+# pointing the domain at the host and inbound ports 80 and 443 reachable from the internet.
+#
+# `api:8000` is the upstream — the compose service name on the internal network, NOT a published
+# host port, so this works even when the API's host port is bound to 127.0.0.1 (RTDP_API_BIND).
+{$RTDP_PUBLIC_HOSTNAME:localhost} {
+	reverse_proxy api:8000
+}

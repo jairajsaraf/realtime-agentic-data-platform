@@ -1,0 +1,71 @@
+{
+  "title": "rtdp — starter dashboard (E6.3 template)",
+  "description": "Starter template for the rtdp single-host demo. All queries are placeholders to validate and adjust against live Datadog data during E6.3. Contains no API keys, org IDs, or real hostnames.",
+  "layout_type": "ordered",
+  "widgets": [
+    {
+      "definition": {
+        "type": "note",
+        "content": "STARTER TEMPLATE — validate every query against live data in E6.3 before relying on this dashboard.",
+        "background_color": "yellow",
+        "font_size": "14",
+        "text_align": "left",
+        "show_tick": false,
+        "tick_pos": "50%",
+        "tick_edge": "left"
+      }
+    },
+    {
+      "definition": {
+        "type": "timeseries",
+        "title": "Request rate — service:rtdp (hits/s)",
+        "show_legend": true,
+        "requests": [
+          {
+            "display_type": "line",
+            "q": "sum:trace.fastapi.request.hits{service:rtdp}.as_rate()"
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "type": "timeseries",
+        "title": "5xx errors — service:rtdp (count)",
+        "show_legend": true,
+        "requests": [
+          {
+            "display_type": "bars",
+            "q": "sum:trace.fastapi.request.errors{service:rtdp,http.status_code:5*}.as_count()"
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "type": "timeseries",
+        "title": "Request latency — service:rtdp (p50/p95, seconds)",
+        "show_legend": true,
+        "requests": [
+          {
+            "display_type": "line",
+            "q": "p50:trace.fastapi.request.duration{service:rtdp}"
+          },
+          {
+            "display_type": "line",
+            "q": "p95:trace.fastapi.request.duration{service:rtdp}"
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "type": "check_status",
+        "title": "/health check status",
+        "check": "http.can_connect",
+        "grouping": "check",
+        "tags": ["instance:rtdp-health"]
+      }
+    }
+  ]
+}

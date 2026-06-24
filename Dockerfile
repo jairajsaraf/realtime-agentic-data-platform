@@ -18,14 +18,20 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
+# Optional dependency extras baked into the resolved venv (Stage E6). Empty default keeps the image
+# lean and dependency-free (the telemetry boundary stays no-op). The published/deployed image is
+# built with `--build-arg RTDP_INSTALL_EXTRAS=otel`, so it carries the OpenTelemetry SDK + OTLP
+# exporter — inert unless RTDP_OTEL_ENABLED=true at run time. Pass a single extra name (e.g. `otel`).
+ARG RTDP_INSTALL_EXTRAS=""
+
 # Layer 1: dependencies only — cached unless pyproject.toml / uv.lock change.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project ${RTDP_INSTALL_EXTRAS:+--extra ${RTDP_INSTALL_EXTRAS}}
 
 # Layer 2: the project itself (src/ layout; README is referenced by pyproject metadata).
 COPY src ./src
 COPY README.md ./
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev ${RTDP_INSTALL_EXTRAS:+--extra ${RTDP_INSTALL_EXTRAS}}
 
 # ---- runtime: slim image carrying only the resolved venv + source ----
 FROM python:3.12-slim AS runtime

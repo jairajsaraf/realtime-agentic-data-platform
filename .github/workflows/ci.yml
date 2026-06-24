@@ -122,7 +122,7 @@ jobs:
     name: publish image (GHCR)
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [test, integration-localstack, docker-smoke]
+    needs: [test, telemetry-otel, integration-localstack, docker-smoke]
     permissions:
       contents: read
       packages: write
@@ -131,8 +131,15 @@ jobs:
       - name: Resolve lowercase image ref
         id: ref
         run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      # The deployed image carries the optional [otel] extra so telemetry is *available* on the
+      # host. It stays no-op unless RTDP_OTEL_ENABLED=true at run time; the default `docker-smoke`
+      # build (no build-arg) still validates the lean, dependency-free image.
       - name: Build and tag
-        run: docker build -t "${{ steps.ref.outputs.image }}:${{ github.sha }}" -t "${{ steps.ref.outputs.image }}:latest" .
+        run: |
+          docker build \
+            --build-arg RTDP_INSTALL_EXTRAS=otel \
+            -t "${{ steps.ref.outputs.image }}:${{ github.sha }}" \
+            -t "${{ steps.ref.outputs.image }}:latest" .
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Push image tags
@@ -140,8 +147,14 @@ jobs:
           docker push "${{ steps.ref.outputs.image }}:${{ github.sha }}"
           docker push "${{ steps.ref.outputs.image }}:latest"
 
-  # Gated, no-op deploy placeholder. Performs NO real deployment. Bound to the protected
-  # `production` environment (configure required reviewers) and gated behind all prior jobs.
+  # Real, gated deploy. Runs ONLY on a push to `main`, behind the protected `production`
+  # environment (configure required reviewers there for manual approval), and only after the image
+  # is published. Uses raw OpenSSH — no third-party action ever handles the key: the private key is
+  # written to a 0600 temp file; the host key is verified against the pinned DEPLOY_SSH_KNOWN_HOSTS
+  # secret when set (else a warned-about ssh-keyscan fallback); the deploy path + the approved
+  # commit's SHA-pinned image are passed as positional args to the reviewed host script
+  # (deploy/host_deploy.sh), which runs `docker compose pull && up -d` plus a post-deploy /health
+  # check and exits non-zero on failure. Secrets come from the `production` environment, never echoed.
   deploy:
     name: deploy (gated)
     runs-on: ubuntu-latest
@@ -151,10 +164,48 @@ jobs:
       contents: read
     environment: production
     steps:
-      - name: Gated deploy placeholder (no-op)
+      - name: Deploy over SSH (host runs compose pull + up + /health check)
+        env:
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_PATH: ${{ secrets.DEPLOY_SSH_PATH }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
         run: |
-          echo "Deploy is intentionally gated and not wired yet (no-op)."
-          echo "To enable a real deploy (separately approved):"
-          echo "  1. Configure the 'production' environment with required reviewers."
-          echo "  2. Add environment secrets: DEPLOY_SSH_HOST, DEPLOY_SSH_USER, DEPLOY_SSH_KEY, DEPLOY_PATH."
-          echo "  3. Replace this step with the deploy commands."
+          set -euo pipefail
+          umask 077
+          key_file="$(mktemp)"
+          known_hosts="$(mktemp)"
+          trap 'rm -f "$key_file" "$known_hosts"' EXIT
+          # Private key -> 0600 temp file. mktemp already creates it 0600 under umask 077; chmod is
+          # explicit. The key is read from the env (masked) and never printed.
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          # Prefer an out-of-band pinned host key (DEPLOY_SSH_KNOWN_HOSTS). Fall back to in-band
+          # ssh-keyscan (trust-on-first-use) with a warning when it is unset — pin it in E6.2.
+          if [ -n "${DEPLOY_SSH_KNOWN_HOSTS:-}" ]; then
+            printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$known_hosts"
+          else
+            echo "WARNING: DEPLOY_SSH_KNOWN_HOSTS is unset; falling back to in-band ssh-keyscan (TOFU). Pin it in E6.2." >&2
+            ssh-keyscan -H "$DEPLOY_SSH_HOST" > "$known_hosts"
+          fi
+          # Deploy the APPROVED commit's immutable image (publish-image pushed :$GITHUB_SHA); never
+          # rely on :latest, which a queued/approved run could resolve to a newer commit.
+          image_ref="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]'):${GITHUB_SHA}"
+          # Pass the deploy path + image ref as POSITIONAL parameters ($1/$2) to a fixed remote script
+          # read from stdin (bash -s) — they are consumed as "$1"/"$2", never interpolated into a
+          # command, so a path containing quotes/backticks/$() is a literal value, not evaluated.
+          # printf %q only escapes them for safe transport through ssh's single-string re-parse. No eval.
+          ssh -i "$key_file" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" \
+            "$DEPLOY_SSH_USER@$DEPLOY_SSH_HOST" \
+            "bash -s -- $(printf '%q' "$DEPLOY_SSH_PATH") $(printf '%q' "$image_ref")" <<'REMOTE'
+          set -euo pipefail
+          deploy_path="$1"
+          image_ref="$2"
+          cd "$deploy_path"
+          RTDP_IMAGE="$image_ref" bash deploy/host_deploy.sh
+          REMOTE

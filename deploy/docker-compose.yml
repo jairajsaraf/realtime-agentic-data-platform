@@ -15,7 +15,10 @@ x-rtdp-image: &rtdp-image
   build:
     context: ..
     dockerfile: Dockerfile
-  image: rtdp:local
+  # Local default builds `rtdp:local` from the Dockerfile above. On the deployed host set
+  # RTDP_IMAGE=ghcr.io/<owner>/<repo>:latest so `docker compose pull` fetches the published image
+  # instead of building; the `build:` section stays harmless (only used by `up --build`).
+  image: ${RTDP_IMAGE:-rtdp:local}
 
 x-rtdp-env: &rtdp-env
   RTDP_STORAGE_BACKEND: ${RTDP_STORAGE_BACKEND:-file}
@@ -28,6 +31,13 @@ x-rtdp-env: &rtdp-env
   RTDP_AWS_ACCESS_KEY_ID: ${RTDP_AWS_ACCESS_KEY_ID:-}
   RTDP_AWS_SECRET_ACCESS_KEY: ${RTDP_AWS_SECRET_ACCESS_KEY:-}
   RTDP_AWS_REGION: ${RTDP_AWS_REGION:-us-east-1}
+  # --- observability (Stage E6) — OFF by default. The telemetry boundary stays no-op unless
+  # RTDP_OTEL_ENABLED=true AND the deployed image carries the optional [otel] extra. On the host
+  # (with the `observability` profile) point the endpoint at the Datadog Agent's OTLP gRPC receiver:
+  # RTDP_OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4317. Never required by `/health` or CI.
+  RTDP_OTEL_ENABLED: ${RTDP_OTEL_ENABLED:-false}
+  RTDP_OTEL_EXPORTER_OTLP_ENDPOINT: ${RTDP_OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  RTDP_OTEL_SERVICE_NAME: ${RTDP_OTEL_SERVICE_NAME:-rtdp}
 
 services:
   # Public read API (the only externally exposed app service).
@@ -39,7 +49,12 @@ services:
       RTDP_API_HOST: "0.0.0.0"
       RTDP_API_PORT: "8000"
     ports:
-      - "8000:8000"
+      # Host bind is configurable. Default 0.0.0.0 preserves current local behavior. On the public
+      # host set RTDP_API_BIND=127.0.0.1 so port 8000 is NOT exposed to the internet — Caddy (the
+      # `edge` profile) terminates TLS and reaches the API as `api:8000` over the compose network.
+      # Binding to 127.0.0.1 (not merely a UFW rule) is what keeps 8000 private: Docker publishes
+      # ports via its own iptables chain that bypasses UFW.
+      - "${RTDP_API_BIND:-0.0.0.0}:8000:8000"
     volumes:
       - rtdp-state:/data
     restart: unless-stopped
@@ -81,6 +96,48 @@ services:
       - rtdp-state:/data
     profiles: ["maintain"]
     restart: "no"
+
+  # --- edge (profile "edge"): Caddy reverse proxy with automatic Let's Encrypt HTTPS ---
+  # Fronts the read API. Local: RTDP_PUBLIC_HOSTNAME defaults to `localhost`, so Caddy serves with
+  # its internal CA (test via `curl -k https://localhost/health`). Public host: set
+  # RTDP_PUBLIC_HOSTNAME to the real domain (DNS A-record -> droplet, ports 80/443 open) and Caddy
+  # provisions a real Let's Encrypt certificate automatically. Profile-gated, so the default local
+  # path (file:// / MinIO) is unchanged and `docker compose config` stays key-free.
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      RTDP_PUBLIC_HOSTNAME: ${RTDP_PUBLIC_HOSTNAME:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # persisted certs/ACME state — keep across restarts to avoid re-issuance
+      - caddy-config:/config
+    depends_on:
+      - api
+    profiles: ["edge"]
+    restart: unless-stopped
+
+  # --- observability (profile "observability"): Datadog Agent receiving OTLP from the app ---
+  # The app's telemetry boundary (api/stream/agent) exports traces over OTLP gRPC; this Agent
+  # receives them on 4317, reached as `datadog-agent:4317` on the internal compose network. The
+  # port is NOT published to the host. Requires DD_API_KEY at run time (Doppler / host env), so the
+  # service is profile-gated and is NOT part of the default/local path — `docker compose config`
+  # still renders with the empty default. `/health` and CI never depend on this service, and no
+  # `/metrics` scrape endpoint is added.
+  datadog-agent:
+    image: gcr.io/datadoghq/agent:7
+    environment:
+      DD_API_KEY: ${DD_API_KEY:-}
+      DD_SITE: ${DD_SITE:-datadoghq.com}
+      # Enable the OTLP gRPC receiver (matches the app's gRPC OTLP exporter). 0.0.0.0 so sibling
+      # containers can reach it on the compose network; it stays unpublished to the host.
+      DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT: "0.0.0.0:4317"
+    expose:
+      - "4317"          # OTLP gRPC — internal compose network only (NOT published to the host)
+    profiles: ["observability"]
+    restart: unless-stopped
 
   # --- object storage (profile "s3"): self-hosted MinIO via the rtdp `aws` backend ---
   minio:
@@ -129,3 +186,5 @@ services:
 volumes:
   rtdp-state:
   minio-data:
+  caddy-data:
+  caddy-config:

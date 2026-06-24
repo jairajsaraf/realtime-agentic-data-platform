@@ -122,7 +122,7 @@ jobs:
     name: publish image (GHCR)
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [test, integration-localstack, docker-smoke]
+    needs: [test, telemetry-otel, integration-localstack, docker-smoke]
     permissions:
       contents: read
       packages: write

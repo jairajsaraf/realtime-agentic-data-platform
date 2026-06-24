@@ -346,8 +346,11 @@ approved. The public demo, when it exists, serves **synthetic data only**.
    resolve. (If the domain can't be claimed, **stop and ask** before any fallback.)
 4. **Doppler:** create a project + config; add `RTDP_*` (storage/MinIO/AWS, OTel endpoint),
    `DD_API_KEY`, `DD_SITE`, `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`, `RTDP_PUBLIC_HOSTNAME`,
-   `RTDP_IMAGE`, `RTDP_API_BIND=127.0.0.1`, `COMPOSE_PROFILES=s3,edge,observability`. Create a
-   **service token** for the host.
+   `RTDP_API_BIND=127.0.0.1`, `COMPOSE_PROFILES=s3,edge,observability`. Create a
+   **service token** for the host. **Do NOT add `RTDP_IMAGE` to Doppler** — it is
+   deployment-controlled: the gated deploy passes the approved commit's SHA-pinned ref and
+   `host_deploy.sh` runs `doppler run --preserve-env=RTDP_IMAGE`, so a Doppler secret can't override
+   the approved image.
 5. **GitHub `production` environment:** create it, add **required reviewers**, restrict to `main`.
 6. **Add `production` environment secrets:** `DEPLOY_SSH_HOST` (droplet host/IP), `DEPLOY_SSH_USER`
    (`deploy`), `DEPLOY_SSH_KEY` (the deploy user's **private** key), `DEPLOY_SSH_PATH` (deploy dir,

@@ -54,10 +54,13 @@ done
 compose=(docker compose -f "${compose_file}")
 
 # Wrap compose with `doppler run --` only when Doppler is available and not explicitly disabled.
+# Preserve the ambient, CI-supplied RTDP_IMAGE (the approved SHA-pinned ref) so a same-named Doppler
+# secret can't override it: --preserve-env is scoped to that ONE var, so all other RTDP_*/DD_* secrets
+# still inject normally. RTDP_IMAGE is deployment-controlled and must NOT be stored as a Doppler secret.
 runner=()
 if [ "${RTDP_DEPLOY_NO_DOPPLER:-0}" != "1" ] && command -v doppler >/dev/null 2>&1; then
-  runner=(doppler run --)
-  log "Injecting runtime secrets via 'doppler run --'."
+  runner=(doppler run --preserve-env="RTDP_IMAGE" --)
+  log "Injecting runtime secrets via 'doppler run --' (preserving ambient RTDP_IMAGE)."
 else
   log "Not using Doppler (unavailable or disabled); relying on ambient env / local .env."
 fi

@@ -131,6 +131,11 @@ services:
     environment:
       DD_API_KEY: ${DD_API_KEY:-}
       DD_SITE: ${DD_SITE:-datadoghq.com}
+      # Explicit hostname (non-secret). A containerized Agent derives its host name from cloud
+      # metadata (AWS/GCP/Azure only — NOT DigitalOcean) or the Docker socket (not mounted here), so
+      # without this it cannot "reliably determine the host name" and exits. Default keeps the
+      # `observability` profile self-contained; override via env/DD_HOSTNAME if needed.
+      DD_HOSTNAME: ${DD_HOSTNAME:-rtdp-demo}
       # Enable the OTLP gRPC receiver (matches the app's gRPC OTLP exporter). 0.0.0.0 so sibling
       # containers can reach it on the compose network; it stays unpublished to the host.
       DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT: "0.0.0.0:4317"

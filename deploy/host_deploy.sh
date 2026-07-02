@@ -54,6 +54,17 @@ if [ -n "${expected_sha}" ]; then
          "then re-run the deploy." >&2
     exit 1
   fi
+  # Reject a dirty worktree (Codex PR #10 P2) — a matching HEAD with local edits would still deploy
+  # unapproved config. Fail closed if the status command itself fails; do not print the file list
+  # (avoid leaking filenames into logs). Mirrors the authoritative check in the CI deploy wrapper.
+  if ! dirty_status="$(git -C "${repo_root}" status --porcelain)"; then
+    echo "ERROR: failed to inspect host checkout worktree state." >&2
+    exit 1
+  fi
+  if [ -n "${dirty_status}" ]; then
+    echo "ERROR: host checkout ${repo_root} has uncommitted or untracked changes; refusing to deploy." >&2
+    exit 1
+  fi
   log "Checkout alignment OK: HEAD ${host_sha} == approved ${expected_sha}."
 fi
 

@@ -210,5 +210,29 @@ jobs:
           image_ref="$2"
           expected_sha="$3"
           cd "$deploy_path"
+          # Authoritative checkout-alignment guard — runs from the approved stdin wrapper, so it is
+          # enforced even if the host's own deploy/host_deploy.sh is stale (Codex PR #10 P1). Verify-only:
+          # no git fetch/checkout, no self-heal.
+          if ! host_sha="$(git rev-parse HEAD 2>/dev/null)"; then
+            echo "ERROR: $deploy_path is not a git checkout; cannot verify deploy alignment." >&2
+            exit 1
+          fi
+          if [ "$host_sha" != "$expected_sha" ]; then
+            echo "ERROR: host checkout $host_sha does not match the approved commit $expected_sha." >&2
+            echo "       Advance $deploy_path to the approved commit out-of-band (git fetch + checkout), then re-run." >&2
+            exit 1
+          fi
+          # Reject a dirty worktree — a matching HEAD with local edits would still deploy unapproved
+          # config (Codex PR #10 P2). --porcelain catches tracked edits AND untracked files; it ignores
+          # gitignored files (e.g. a host .env). Fail closed if the status command itself fails, and do
+          # not print the file list (avoid leaking filenames into Actions logs).
+          if ! dirty_status="$(git status --porcelain)"; then
+            echo "ERROR: failed to inspect host checkout worktree state." >&2
+            exit 1
+          fi
+          if [ -n "$dirty_status" ]; then
+            echo "ERROR: host checkout has uncommitted or untracked changes; refusing to deploy." >&2
+            exit 1
+          fi
           RTDP_IMAGE="$image_ref" RTDP_DEPLOY_EXPECTED_SHA="$expected_sha" bash deploy/host_deploy.sh
           REMOTE

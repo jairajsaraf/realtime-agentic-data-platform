@@ -121,8 +121,9 @@ Bootstrap complete (idempotent — safe to rerun).
 Next (manual, out-of-band — no secrets in this repo):
   1. Add your SSH PUBLIC key to: ${deploy_home}/.ssh/authorized_keys   (as user '${DEPLOY_USER}')
   2. Place the repo's deploy assets under: ${DEPLOY_DIR}   (e.g. 'git clone' there as '${DEPLOY_USER}').
-     Keep this checkout advanced to the commit being deployed: the gated deploy verifies HEAD matches
-     the approved SHA and fails closed on mismatch (it does not 'git pull' for you).
+     Keep this checkout advanced to the commit being deployed AND clean (no local edits): the gated
+     deploy verifies HEAD matches the approved SHA and the worktree is clean, and fails closed otherwise
+     (it does not 'git pull' for you).
   3. Configure Doppler on the host (service token in the deploy user's env) if using 'doppler run'.
   4. In GitHub, set the 'production' environment secrets DEPLOY_SSH_HOST/USER/KEY/PATH.
 

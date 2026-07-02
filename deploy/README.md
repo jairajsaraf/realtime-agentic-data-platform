@@ -150,9 +150,12 @@ PR or a feature branch, and CI provisions no infrastructure.
 `host_deploy.sh` deploys the compose file and mounted config (`docker-compose.yml`,
 `observability/http_check.yaml`, `Caddyfile`) **from the host's git checkout** while the image is the
 CI-approved SHA-pinned ref — it does **not** `git pull`. To stop an approved image running against a
-stale checkout, the gated deploy passes `RTDP_DEPLOY_EXPECTED_SHA=$GITHUB_SHA` and `host_deploy.sh`
-**aborts before `compose pull/up` if the host `HEAD` does not match** (verify-only — it never modifies
-the checkout; no-op when the var is unset, e.g. manual/local runs).
+stale checkout, the gated deploy passes `RTDP_DEPLOY_EXPECTED_SHA=$GITHUB_SHA` and the **CI deploy
+wrapper** — the approved stdin script, enforced even if the host's own `host_deploy.sh` is stale —
+**aborts before `compose pull/up` unless the host `HEAD` matches the approved commit AND the worktree is
+clean** (`git status --porcelain` empty; gitignored files like a host `.env` don't count). `host_deploy.sh`
+carries the same guard as defense-in-depth for manual/local runs. Verify-only — the deploy never modifies
+the checkout (no-op when the var is unset).
 
 **Advance the host checkout out-of-band before approving/running the gated deploy** — as the `deploy`
 user on the host:

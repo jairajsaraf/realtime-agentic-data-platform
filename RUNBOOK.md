@@ -360,12 +360,12 @@ approved. The public demo, when it exists, serves **synthetic data only**.
 7. **Bootstrap the host:** copy the repo to the host, then `sudo bash deploy/bootstrap_host.sh`; add
    your SSH **public** key to `deploy`'s `authorized_keys`; configure the Doppler service token in the
    `deploy` user's environment.
-8. **Advance the host checkout, then approve the deploy:** `host_deploy.sh` verifies the host checkout
-   matches the approved commit and **fails closed** on mismatch (it does not `git pull` for you). First,
-   as `deploy` on the host: `cd "$DEPLOY_SSH_PATH" && git fetch origin main && git checkout <approved-sha>`
-   (or `git pull --ff-only`; then `git status --short` clean). Then push to `main` and **Actions → run →
-   Review deployments → Approve**. The job SSHes in and runs `host_deploy.sh`; it **fails if the checkout
-   is stale or `/health` doesn't pass**.
+8. **Advance the host checkout, then approve the deploy:** the CI deploy wrapper verifies the host
+   checkout `HEAD` matches the approved commit **and the worktree is clean**, and **fails closed**
+   otherwise (untracked files also block; it never `git pull`s for you). First, as `deploy` on the host:
+   `cd "$DEPLOY_SSH_PATH" && git fetch origin main && git checkout <approved-sha>` (or `git pull --ff-only`;
+   then `git status --short` clean). Then push to `main` and **Actions → run → Review deployments →
+   Approve**. The job SSHes in; it **fails if the checkout is stale or dirty, or `/health` doesn't pass**.
 9. Browse `https://<your-domain>/health` and `/docs` once DNS + Let's Encrypt settle.
 
 > **Host-key caveat:** without a pinned key the deploy job falls back to `ssh-keyscan`, which is

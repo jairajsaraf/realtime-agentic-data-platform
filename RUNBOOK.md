@@ -333,7 +333,8 @@ approved. The public demo, when it exists, serves **synthetic data only**.
                  └─────────┼───────────────┘
                            ▼ (E6.3)            Doppler injects RTDP_* / DD_API_KEY on host
                         Datadog                GitHub `production` env secrets = SSH deploy creds only
-   deploy: push main -> CI publish image -> [manual approve] -> SSH -> host_deploy.sh (pull/up/health)
+   deploy: push main -> CI publish image -> [manual approve] -> SSH -> host_deploy.sh
+           (verify host checkout == approved SHA -> pull/up/health)
    external (optional): agent LLM via NVIDIA NIM (config-only); /health + CI never depend on it
 ```
 
@@ -359,8 +360,12 @@ approved. The public demo, when it exists, serves **synthetic data only**.
 7. **Bootstrap the host:** copy the repo to the host, then `sudo bash deploy/bootstrap_host.sh`; add
    your SSH **public** key to `deploy`'s `authorized_keys`; configure the Doppler service token in the
    `deploy` user's environment.
-8. **Approve the first deploy:** push to `main`, then **Actions → run → Review deployments → Approve**.
-   The job SSHes in and runs `host_deploy.sh`; it **fails if `/health` doesn't pass**.
+8. **Advance the host checkout, then approve the deploy:** the CI deploy wrapper verifies the host
+   checkout `HEAD` matches the approved commit **and the worktree is clean**, and **fails closed**
+   otherwise (untracked files also block; it never `git pull`s for you). First, as `deploy` on the host:
+   `cd "$DEPLOY_SSH_PATH" && git fetch origin main && git checkout <approved-sha>` (or `git pull --ff-only`;
+   then `git status --short` clean). Then push to `main` and **Actions → run → Review deployments →
+   Approve**. The job SSHes in; it **fails if the checkout is stale or dirty, or `/health` doesn't pass**.
 9. Browse `https://<your-domain>/health` and `/docs` once DNS + Let's Encrypt settle.
 
 > **Host-key caveat:** without a pinned key the deploy job falls back to `ssh-keyscan`, which is
@@ -375,7 +380,8 @@ approved. The public demo, when it exists, serves **synthetic data only**.
 docker compose -f deploy/docker-compose.yml config                       # default renders, key-free
 docker compose -f deploy/docker-compose.yml `
   --profile s3 --profile edge --profile observability config             # all profiles render
-bash -n deploy/bootstrap_host.sh deploy/host_deploy.sh                   # shell syntax (Git Bash)
+bash -n deploy/bootstrap_host.sh deploy/host_deploy.sh                   # shell syntax (also run in CI)
+RTDP_DEPLOY_EXPECTED_SHA=deadbeef bash deploy/host_deploy.sh             # checkout guard: ERRORs + exits 1 (pre-docker)
 # Optional bring-up (file:// synthetic + Caddy):
 docker compose -f deploy/docker-compose.yml --profile edge up -d
 curl -k https://localhost/health        # Caddy internal CA (or: curl http://localhost:8000/health)

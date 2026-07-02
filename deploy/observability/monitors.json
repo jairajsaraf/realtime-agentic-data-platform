@@ -2,7 +2,7 @@
   {
     "name": "[rtdp] Host down",
     "type": "service check",
-    "query": "\"datadog.agent.up\".over(\"host:rtdp-demo\").last(2).count_by_status()",
+    "query": "\"datadog.agent.up\".over(\"host:rtdp-demo\").last(2).by(\"host\").count_by_status()",
     "message": "The rtdp host/agent is not reporting to Datadog. Notification-free for now — add a notification channel before enabling alerts.",
     "tags": ["service:rtdp", "managed-by:rtdp"],
     "options": {
@@ -15,7 +15,7 @@
   {
     "name": "[rtdp] /health failing",
     "type": "service check",
-    "query": "\"http.can_connect\".over(\"instance:rtdp_health\").last(3).count_by_status()",
+    "query": "\"http.can_connect\".over(\"instance:rtdp_health\").last(3).by(\"host\").count_by_status()",
     "message": "The /health endpoint check (instance:rtdp_health) is failing. Notification-free for now — add a notification channel before enabling alerts.",
     "tags": ["service:rtdp", "managed-by:rtdp"],
     "options": {

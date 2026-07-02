@@ -127,7 +127,9 @@ services:
   # still renders with the empty default. `/health` and CI never depend on this service, and no
   # `/metrics` scrape endpoint is added.
   datadog-agent:
-    image: gcr.io/datadoghq/agent:7
+    # Pinned to the exact version verified live in E6.3 (hostname fix, OTLP ingest, traces
+    # end-to-end confirmed) instead of the moving `:7` tag.
+    image: gcr.io/datadoghq/agent:7.80.3
     environment:
       DD_API_KEY: ${DD_API_KEY:-}
       DD_SITE: ${DD_SITE:-datadoghq.com}
@@ -139,6 +141,11 @@ services:
       # Enable the OTLP gRPC receiver (matches the app's gRPC OTLP exporter). 0.0.0.0 so sibling
       # containers can reach it on the compose network; it stays unpublished to the host.
       DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT: "0.0.0.0:4317"
+    volumes:
+      # Minimal http_check against the API's internal /health (E6.3, decision D4). Single read-only
+      # file; reports the `http.can_connect` service check tagged `instance:rtdp-health`. The path
+      # resolves relative to this compose file (deploy/), same pattern as Caddy's ./Caddyfile mount.
+      - ./observability/http_check.yaml:/etc/datadog-agent/conf.d/http_check.d/conf.yaml:ro
     expose:
       - "4317"          # OTLP gRPC — internal compose network only (NOT published to the host)
     profiles: ["observability"]

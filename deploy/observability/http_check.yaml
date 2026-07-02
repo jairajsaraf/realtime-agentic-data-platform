@@ -1,0 +1,11 @@
+# Datadog Agent HTTP check for the API's internal /health endpoint (E6.3, decision D4). Mounted
+# read-only into the Agent by deploy/docker-compose.yml. The `http_check` integration normalizes the
+# instance tag, so `name: rtdp_health` yields the automatic `instance:rtdp_health` tag on the
+# `http.can_connect` service check that the dashboard/monitors query. Internal compose-network URL
+# only — nothing new is exposed to the host or the internet.
+init_config:
+
+instances:
+  - name: rtdp_health
+    url: http://api:8000/health
+    timeout: 5

@@ -123,7 +123,9 @@ Image validation is kept separate from publishing, and publishing separate from 
   `environment: production`) — a **real, gated SSH deploy**. Raw OpenSSH (no third-party action):
   writes `DEPLOY_SSH_KEY` to a 0600 temp file, pins the host key with `ssh-keyscan`, and runs exactly
   one remote command — `bash "$DEPLOY_SSH_PATH/deploy/host_deploy.sh"` (compose pull + up + `/health`
-  check). No secrets are printed; it runs only after a human approves the `production` environment.
+  check). It passes the approved commit as `RTDP_DEPLOY_EXPECTED_SHA=$GITHUB_SHA`, so the host aborts
+  before compose if its checkout is stale (see "Checkout alignment" below). No secrets are printed; it
+  runs only after a human approves the `production` environment.
 
 ### Required GitHub settings (manual; not automated here)
 - Create a **`production` Environment** with **required reviewers** and restrict deployment branches
@@ -143,3 +145,21 @@ environment and does nothing until a required reviewer approves it in the GitHub
 (**Actions → the run → Review deployments → Approve**). On approval it SSHes to the host and runs
 `host_deploy.sh`; the job **fails if the post-deploy `/health` check fails**. Nothing deploys from a
 PR or a feature branch, and CI provisions no infrastructure.
+
+### Checkout alignment (host must match the approved commit)
+`host_deploy.sh` deploys the compose file and mounted config (`docker-compose.yml`,
+`observability/http_check.yaml`, `Caddyfile`) **from the host's git checkout** while the image is the
+CI-approved SHA-pinned ref — it does **not** `git pull`. To stop an approved image running against a
+stale checkout, the gated deploy passes `RTDP_DEPLOY_EXPECTED_SHA=$GITHUB_SHA` and `host_deploy.sh`
+**aborts before `compose pull/up` if the host `HEAD` does not match** (verify-only — it never modifies
+the checkout; no-op when the var is unset, e.g. manual/local runs).
+
+**Advance the host checkout out-of-band before approving/running the gated deploy** — as the `deploy`
+user on the host:
+
+```
+cd "$DEPLOY_SSH_PATH"            # e.g. /opt/rtdp
+git fetch origin main
+git checkout <approved-sha>      # or: git pull --ff-only  (if tracking main)
+git status --short               # expect clean
+```

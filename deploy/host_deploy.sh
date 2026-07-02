@@ -33,6 +33,30 @@ if [ ! -f "${compose_file}" ]; then
   exit 1
 fi
 
+# --- checkout-alignment guard (verify-only, fail closed) ---
+# This script deploys the compose file + mounted config (observability/http_check.yaml, Caddyfile) FROM
+# THE HOST CHECKOUT, while the image is the CI-approved SHA-pinned ref. A stale checkout would run the
+# approved image against stale orchestration/config with no signal. When the CI deploy passes the approved
+# commit SHA (RTDP_DEPLOY_EXPECTED_SHA), refuse to proceed unless the host checkout matches it.
+# Verify-only: this does NOT modify the checkout (updating it stays an out-of-band step) — it turns silent
+# drift into an early, safe failure. No-op when the var is unset (manual/local runs), so it stays
+# backward compatible.
+expected_sha="${RTDP_DEPLOY_EXPECTED_SHA:-}"
+if [ -n "${expected_sha}" ]; then
+  if ! host_sha="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null)"; then
+    echo "ERROR: RTDP_DEPLOY_EXPECTED_SHA is set but ${repo_root} is not a git checkout;" \
+         "cannot verify deploy alignment." >&2
+    exit 1
+  fi
+  if [ "${host_sha}" != "${expected_sha}" ]; then
+    echo "ERROR: host checkout ${host_sha} does not match the approved commit ${expected_sha}." >&2
+    echo "       Update ${repo_root} to the approved commit out-of-band (git fetch + checkout)," \
+         "then re-run the deploy." >&2
+    exit 1
+  fi
+  log "Checkout alignment OK: HEAD ${host_sha} == approved ${expected_sha}."
+fi
+
 # Profiles compose should activate (compose reads COMPOSE_PROFILES natively). Exported so both the
 # `pull` and `up` invocations see the same set.
 export COMPOSE_PROFILES="${COMPOSE_PROFILES:-s3,edge,observability}"

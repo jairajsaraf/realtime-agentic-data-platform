@@ -1,20 +1,8 @@
 {
-  "title": "rtdp — starter dashboard (E6.3 template)",
-  "description": "Starter template for the rtdp single-host demo. All queries are placeholders to validate and adjust against live Datadog data during E6.3. Contains no API keys, org IDs, or real hostnames.",
+  "title": "rtdp — single-host demo dashboard",
+  "description": "Overview for the rtdp single-host demo (service:rtdp, host:rtdp-demo, Datadog US5): request rate, 5xx responses, latency percentiles, and /health check status. Contains no API keys, org IDs, or secrets.",
   "layout_type": "ordered",
   "widgets": [
-    {
-      "definition": {
-        "type": "note",
-        "content": "STARTER TEMPLATE — validate every query against live data in E6.3 before relying on this dashboard.",
-        "background_color": "yellow",
-        "font_size": "14",
-        "text_align": "left",
-        "show_tick": false,
-        "tick_pos": "50%",
-        "tick_edge": "left"
-      }
-    },
     {
       "definition": {
         "type": "timeseries",
@@ -23,7 +11,7 @@
         "requests": [
           {
             "display_type": "line",
-            "q": "sum:trace.fastapi.request.hits{service:rtdp}.as_rate()"
+            "q": "sum:trace.http.server.request.hits{service:rtdp}.as_rate()"
           }
         ]
       }
@@ -36,7 +24,7 @@
         "requests": [
           {
             "display_type": "bars",
-            "q": "sum:trace.fastapi.request.errors{service:rtdp,http.status_code:5*}.as_count()"
+            "q": "sum:trace.http.server.request.hits{service:rtdp,http.status_code:5*}.as_count()"
           }
         ]
       }
@@ -49,11 +37,11 @@
         "requests": [
           {
             "display_type": "line",
-            "q": "p50:trace.fastapi.request.duration{service:rtdp}"
+            "q": "p50:trace.http.server.request{service:rtdp}"
           },
           {
             "display_type": "line",
-            "q": "p95:trace.fastapi.request.duration{service:rtdp}"
+            "q": "p95:trace.http.server.request{service:rtdp}"
           }
         ]
       }
@@ -64,7 +52,7 @@
         "title": "/health check status",
         "check": "http.can_connect",
         "grouping": "check",
-        "tags": ["instance:rtdp-health"]
+        "tags": ["instance:rtdp_health"]
       }
     }
   ]

@@ -1,10 +1,10 @@
 [
   {
-    "name": "[rtdp][TEMPLATE] Host down",
+    "name": "[rtdp] Host down",
     "type": "service check",
-    "query": "\"datadog.agent.up\".over(\"service:rtdp\").last(2).count_by_status()",
-    "message": "Starter template — validate against live Datadog data in E6.3. The rtdp host/agent is not reporting. Configure your notification channel here.",
-    "tags": ["service:rtdp", "env:prod", "managed-by:rtdp-template"],
+    "query": "\"datadog.agent.up\".over(\"host:rtdp-demo\").last(2).count_by_status()",
+    "message": "The rtdp host/agent is not reporting to Datadog. Notification-free for now — add a notification channel before enabling alerts.",
+    "tags": ["service:rtdp", "managed-by:rtdp"],
     "options": {
       "thresholds": { "critical": 1, "warning": 1, "ok": 1 },
       "notify_no_data": true,
@@ -13,11 +13,11 @@
     }
   },
   {
-    "name": "[rtdp][TEMPLATE] /health failing",
+    "name": "[rtdp] /health failing",
     "type": "service check",
-    "query": "\"http.can_connect\".over(\"instance:rtdp-health\").last(3).count_by_status()",
-    "message": "Starter template — validate in E6.3. The /health endpoint check is failing. Configure the http_check instance (instance:rtdp-health) and your notification channel.",
-    "tags": ["service:rtdp", "env:prod", "managed-by:rtdp-template"],
+    "query": "\"http.can_connect\".over(\"instance:rtdp_health\").last(3).count_by_status()",
+    "message": "The /health endpoint check (instance:rtdp_health) is failing. Notification-free for now — add a notification channel before enabling alerts.",
+    "tags": ["service:rtdp", "managed-by:rtdp"],
     "options": {
       "thresholds": { "critical": 2, "warning": 1, "ok": 1 },
       "notify_no_data": true,
@@ -25,23 +25,11 @@
     }
   },
   {
-    "name": "[rtdp][TEMPLATE] Elevated 5xx error rate",
+    "name": "[rtdp] Elevated request latency (p95)",
     "type": "metric alert",
-    "query": "sum(last_5m):sum:trace.fastapi.request.errors{service:rtdp,http.status_code:5*}.as_count() > 10",
-    "message": "Starter template — validate the metric name and threshold against live APM data in E6.3. Elevated 5xx responses from service:rtdp. Configure your notification channel here.",
-    "tags": ["service:rtdp", "env:prod", "managed-by:rtdp-template"],
-    "options": {
-      "thresholds": { "critical": 10, "warning": 5 },
-      "notify_no_data": false,
-      "renotify_interval": 0
-    }
-  },
-  {
-    "name": "[rtdp][TEMPLATE] Elevated request latency (p95)",
-    "type": "metric alert",
-    "query": "avg(last_5m):p95:trace.fastapi.request.duration{service:rtdp} > 1",
-    "message": "Starter template — validate the metric name and threshold (seconds) against live APM data in E6.3. p95 latency for service:rtdp is elevated. Configure your notification channel here.",
-    "tags": ["service:rtdp", "env:prod", "managed-by:rtdp-template"],
+    "query": "avg(last_5m):p95:trace.http.server.request{service:rtdp} > 1",
+    "message": "p95 latency for service:rtdp is elevated. Thresholds are provisional — observed p95 is ~0.3–1.5s, so revisit before enabling alerts. Notification-free for now — add a notification channel before enabling.",
+    "tags": ["service:rtdp", "managed-by:rtdp"],
     "options": {
       "thresholds": { "critical": 1, "warning": 0.5 },
       "notify_no_data": false

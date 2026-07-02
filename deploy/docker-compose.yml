@@ -143,7 +143,7 @@ services:
       DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT: "0.0.0.0:4317"
     volumes:
       # Minimal http_check against the API's internal /health (E6.3, decision D4). Single read-only
-      # file; reports the `http.can_connect` service check tagged `instance:rtdp-health`. The path
+      # file; reports the `http.can_connect` service check tagged `instance:rtdp_health`. The path
       # resolves relative to this compose file (deploy/), same pattern as Caddy's ./Caddyfile mount.
       - ./observability/http_check.yaml:/etc/datadog-agent/conf.d/http_check.d/conf.yaml:ro
     expose:

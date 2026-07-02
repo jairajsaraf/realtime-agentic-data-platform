@@ -1,23 +1,29 @@
-# Observability templates (E6.3)
+# Observability assets (E6.3)
 
-Starter, **key-free** Datadog assets for the rtdp single-host demo. These are **templates only** —
+**Key-free** Datadog assets for the rtdp single-host demo (Datadog **US5**). Reviewable JSON —
 nothing here is applied to Datadog automatically, and they contain no API keys, application keys,
-org IDs, real hostnames, or domains.
+org IDs, real secrets, or domains.
 
 ## Files
 
-- `dashboard.json` — a starter dashboard (request rate, 5xx, latency, `/health` check status).
-- `monitors.json` — starter monitors: **host down**, **/health failing**, **elevated 5xx**, and
-  **elevated latency**. Each is named `[rtdp][TEMPLATE] …` so it is obvious they need validation.
+- `dashboard.json` — dashboard for the demo (request rate, 5xx responses, latency percentiles,
+  `/health` check status).
+- `monitors.json` — monitors: **[rtdp] Host down**, **[rtdp] /health failing**, and **[rtdp] Elevated
+  request latency (p95)**. A dedicated 5xx-rate monitor is **deferred** — Datadog US5 exposes no
+  `trace.http.server.request.errors` metric, so an active alert would only ever be no-data. The 5xx
+  signal is kept as a dashboard widget instead (request hits filtered by status code).
 
-## How these apply (E6.3 — needs a live Datadog key; NOT done in E6.1)
+## How these apply (E6.3 — needs a live Datadog application key; run by you, never in CI)
 
-These are reviewable definitions to import and validate once Datadog is live. The app exports OTLP
-traces under `service:rtdp` (see `RTDP_OTEL_SERVICE_NAME`); the metric names, tags, and thresholds
-here are **starting points to confirm against real data** before relying on them. Example (run by you
-in E6.3, with your own keys in the environment — never committed):
+These are reviewable definitions to import and validate. The app exports OTLP traces under `service:rtdp`
+(see `RTDP_OTEL_SERVICE_NAME`) to the Datadog Agent on host `rtdp-demo`, which forwards to Datadog
+**US5**. Validate every query in the US5 UI before relying on it. Example (run by you, with your own keys
+in the environment — never committed):
 
 ```
+# Datadog site for this deployment: US5
+export DD_SITE=us5.datadoghq.com      # API host: api.us5.datadoghq.com
+
 # Dashboard:
 curl -X POST "https://api.${DD_SITE}/api/v1/dashboard" \
   -H "DD-API-KEY: ${DD_API_KEY}" -H "DD-APPLICATION-KEY: ${DD_APP_KEY}" \
@@ -29,8 +35,12 @@ curl -X POST "https://api.${DD_SITE}/api/v1/dashboard" \
 ## Notes
 
 - **No Terraform** — plain JSON, intentionally reviewable in a PR.
-- Queries assume APM traces from the FastAPI instrumentation (`trace.fastapi.request.*`). Confirm the
-  exact metric names in your Datadog account during E6.3 — OTLP→Datadog naming can vary by pipeline.
-- Replace the `instance:rtdp-health` / `env:prod` tags, thresholds, and notification channels with
-  your real values in E6.3. None here are real.
+- Live metric names (confirmed in US5): request rate uses `trace.http.server.request.hits`; latency uses
+  the `trace.http.server.request` **distribution** metric (percentiles enabled, e.g. `p50:`/`p95:`).
+  `trace.http.server.request.errors` is **absent**, so the 5xx dashboard widget uses
+  `trace.http.server.request.hits{…,http.status_code:5*}` and the dedicated 5xx monitor is deferred.
+- The `/health` service check emits `http.can_connect` tagged `instance:rtdp_health` (see
+  `deploy/observability/http_check.yaml`). No `env` scope is used — live `env` is unset (`none`).
+- Monitors are **notification-free** (no recipients) and thresholds are provisional; add a notification
+  channel and revisit thresholds before enabling alerts. **No secrets are committed or printed.**
 - `/health` and CI never depend on Datadog; these assets are additive and optional.

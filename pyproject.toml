@@ -30,6 +30,13 @@ otel = [
     "opentelemetry-exporter-otlp>=1.27",
     "opentelemetry-instrumentation-fastapi>=0.48b0",
 ]
+# Opt-in MCP server (post-E6): read-only MCP tools over the Stage 2A read API, stdio transport.
+# NOT installed by default; `rtdp mcp` exits with an install hint unless this extra is present.
+# Stable v1.x SDK line only — v2 is a pre-release, hence the <2 bound.
+# Install with: uv sync --extra mcp
+mcp = [
+    "mcp>=1.28,<2",
+]
 
 [dependency-groups]
 dev = [

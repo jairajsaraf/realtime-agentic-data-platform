@@ -34,6 +34,7 @@ a CI/CD path of **docker-smoke → GHCR publish → gated SSH deploy**.
 | **Stage 2B — incremental micro-batch ingestion** | ✅ Complete | A scheduled `rtdp stream` loop that polls a source and appends micro-batches via the existing writer (within-batch dedup, skip-empty, read-time latest-state view, opt-in snapshot expiration). Near-real-time micro-batch — **not** true streaming. |
 | **Stage D — agentic layer** | ✅ Complete | A natural-language agent (`rtdp agent`) that answers flight questions and diagnoses data quality by calling the Stage 2A HTTP API as tools. Strictly read-only and human-in-the-loop — proposes remediations, never mutates. Deterministic fake-LLM tests; opt-in live eval harness. |
 | **Stage E — productionization & observability** | ✅ Complete | One Docker image (multi-entrypoint: serve/stream/maintain/agent) deployed live to a single host: **Caddy** fronts the read-only API with automatic Let's Encrypt HTTPS, `stream` appends synthetic micro-batches, and an optional **OpenTelemetry → Datadog** boundary (`[otel]` extra, no-op by default locally) reports traces and a `/health` service check. CI/CD smoke-tests the image, publishes it to GHCR on `main`, and runs a **real, gated** SSH deploy (protected `production` environment). **Ops-only and additive** — no new data features or endpoints (no `/metrics`); the public demo serves **synthetic data only**. |
+| **Add-on — MCP server** (post-E6) | ✅ Complete | An optional, read-only [MCP](https://modelcontextprotocol.io) server (`rtdp mcp`, `[mcp]` extra, stdio) exposing the six Stage 2A read endpoints as typed MCP tools for any MCP client. Another HTTP client of the API, exactly like the Stage D agent — no new endpoints, no write surface. |
 | **Later stages** | ⬜ Planned | True streaming (Kafka/Flink), RAG/vector search, fine-tuning, orchestration, product/analytics dashboards (beyond the live Datadog observability dashboard), real-AWS / multi-host (Kubernetes) deployment. |
 
 ## Architecture
@@ -514,6 +515,70 @@ GPU/inference provisioning, and **neither CI nor `/health` ever depends on it**.
 > deployed on one always-on host behind Caddy TLS, with the OpenTelemetry → Datadog observability
 > boundary validated live. The demo serves **synthetic data only**; multi-host / Kubernetes /
 > real-AWS deployment remains out of scope (see [roadmap](#out-of-scope--roadmap)).
+
+---
+
+## Optional add-on — MCP server over the read API
+
+`rtdp mcp` starts a vendor-neutral [Model Context Protocol](https://modelcontextprotocol.io)
+server (official Python SDK, **stdio** transport) that exposes the six Stage 2A read endpoints as
+typed MCP tools, so any MCP client (Claude Code, Claude Desktop, MCP Inspector, …) can query the
+lakehouse. It occupies the same seat as the Stage D agent — **another HTTP client of the API**:
+
+`MCP client → rtdp mcp (stdio) → Stage 2A HTTP API → query → catalog`
+
+- **Read-only by construction.** Six GET-backed tools and nothing else — no write surface. The
+  server never imports `rtdp.query`, the catalog, or DuckDB/Iceberg table APIs (a boundary test
+  enforces this), and it adds no new API endpoint.
+- **Optional extra.** The `mcp` SDK ships behind the `[mcp]` extra (mirroring `[otel]`); the core
+  install and every other CLI command work without it, and `rtdp mcp` exits with an install hint
+  when it is missing.
+- **Requires a reachable read API.** The server does not start one — run `rtdp serve` first. A
+  startup probe warns on stderr until the API is up; stdout is reserved for MCP JSON-RPC frames.
+
+| MCP tool | Endpoint | Notes |
+| --- | --- | --- |
+| `health` | `GET /health` | Catalog/table reachability + current snapshot id (an unhealthy 503 body is returned as data). |
+| `list_flights` | `GET /flights` | Filters (`icao24`, `callsign`, time window), paging, snapshot/timestamp time-travel. |
+| `list_flights_in_bbox` | `GET /flights/bbox` | Lat/lon bounding box (required), plus the same filters/paging/time-travel. |
+| `flights_per_interval` | `GET /stats/flights-per-interval` | Per-hour/day counts, optional `group_by=origin_country`, time-travel. |
+| `list_snapshots` | `GET /snapshots` | Snapshot history — ids feed the `as_of_snapshot_id` time-travel parameters. |
+| `get_meta` | `GET /meta` | Table identifier, snapshot pointer/count, schema, partition spec. |
+
+```bash
+# 1. Install the extra, seed data, and start the read-only API:
+uv sync --extra mcp
+uv run rtdp ingest --source synthetic --rows 80
+uv run rtdp serve                                   # http://127.0.0.1:8000
+
+# 2. Run the MCP server (stdio; usually launched BY the MCP client — see below):
+uv run rtdp mcp                                     # --api-url / RTDP_AGENT_API_URL to override
+```
+
+Register it with an MCP client, e.g. Claude Code (`--directory` matters because MCP clients spawn
+servers from an arbitrary working directory):
+
+```bash
+claude mcp add rtdp -- uv --directory <path-to-this-repo> run rtdp mcp
+```
+
+or the generic JSON config used by Claude Desktop and most other clients:
+
+```json
+{
+  "mcpServers": {
+    "rtdp": {
+      "command": "uv",
+      "args": ["--directory", "<path-to-this-repo>", "run", "rtdp", "mcp"]
+    }
+  }
+}
+```
+
+Responses reuse the API's typed models (`rtdp.api.models`) as MCP structured output, so tool
+results carry schemas end to end. stdio is the only v1 transport (Streamable HTTP/SSE are
+documented later options, not built). Tests are deterministic and offline — the suite drives the
+FastAPI app in-process — and the CI `mcp-extra` job runs them with the extra installed.
 
 ---
 

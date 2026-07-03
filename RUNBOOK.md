@@ -230,6 +230,42 @@ coordinates/altitude, nulls, duplicate state keys) from the rows the API returns
   usage**; failures are listed explicitly. The JSON report path is git-ignored and contains no keys.
   A non-zero exit means at least one case failed — read the failures, don't just trust a pass.
 
+### 5. Optional: MCP server over the read API (`[mcp]` extra)
+
+`rtdp mcp` exposes the six Stage 2A read endpoints as typed MCP tools over **stdio** for any MCP
+client. Same seat as the agent — another HTTP client of the API; read-only, no new endpoint.
+
+```powershell
+# Install the optional extra, then start the read API (section G.1) in another shell:
+uv sync --extra mcp
+uv run rtdp serve
+
+# Run the MCP server (stdio; usually the MCP client launches it for you):
+uv run rtdp mcp                          # --api-url or $env:RTDP_AGENT_API_URL to override
+```
+
+The banner and any warnings print to **stderr** (stdout carries the MCP JSON-RPC frames). If the
+API is not up yet, the server still starts and warns; every tool call returns a clear error until
+`rtdp serve` is running.
+
+Register with a client, e.g. Claude Code (run from anywhere; `--directory` pins the repo):
+
+```powershell
+claude mcp add rtdp -- uv --directory <path-to-this-repo> run rtdp mcp
+```
+
+Verify: the client should list six tools (`health`, `list_flights`, `list_flights_in_bbox`,
+`flights_per_interval`, `list_snapshots`, `get_meta`); ask it to call `health`.
+
+Troubleshooting: exit code `2` with an install hint → the `[mcp]` extra is missing
+(`uv sync --extra mcp`); tool errors mentioning `rtdp serve` → start the read API.
+
+Tests are deterministic and offline (no MCP client, no network, no Docker):
+
+```powershell
+uv run --extra mcp -- pytest tests/test_mcp_server.py tests/test_mcp_cli.py -m "not localstack"
+```
+
 ---
 
 ## H. Stage E — containerized single-host topology & observability (ops-only)

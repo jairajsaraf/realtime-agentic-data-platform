@@ -7,6 +7,7 @@
 ``rtdp stream``   scheduled micro-batch ingestion (Stage 2B; near-real-time, not true streaming).
 ``rtdp maintain`` table maintenance, e.g. snapshot expiration (Stage 2B; metadata-only).
 ``rtdp agent``    natural-language agent over the read API (Stage D; read-only, HITL).
+``rtdp mcp``      read-only MCP server over the read API (stdio; optional ``[mcp]`` extra).
 """
 
 from __future__ import annotations
@@ -238,6 +239,25 @@ def _agent(settings: Settings, args: argparse.Namespace) -> int:
         client.close()
 
 
+def _mcp(settings: Settings, args: argparse.Namespace) -> int:
+    if args.api_url is not None:
+        settings = settings.model_copy(update={"agent_api_url": args.api_url})
+    try:
+        from .mcp.server import serve as mcp_serve
+    except ImportError as exc:
+        # Only a missing `mcp` SDK means "install the extra"; any other ImportError is a real
+        # failure (e.g. a bug inside rtdp.mcp.server) and must surface, not be masked.
+        if (exc.name or "").partition(".")[0] != "mcp":
+            raise
+        print(
+            "The MCP server requires the optional [mcp] extra.\n"
+            "Install it with: uv sync --extra mcp   (or: pip install 'rtdp[mcp]')",
+            file=sys.stderr,
+        )
+        return 2
+    return mcp_serve(settings)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rtdp", description="Stage 1 Iceberg lakehouse CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -311,6 +331,14 @@ def main(argv: list[str] | None = None) -> int:
         "--json", action="store_true", help="emit JSON (answer + provenance) instead of text"
     )
 
+    mcp = sub.add_parser(
+        "mcp",
+        help="Read-only MCP server over the read API (stdio; requires the optional [mcp] extra)",
+    )
+    mcp.add_argument(
+        "--api-url", default=None, help="read API base URL (default: settings / local serve)"
+    )
+
     args = parser.parse_args(argv)
     settings = Settings()
 
@@ -328,6 +356,8 @@ def main(argv: list[str] | None = None) -> int:
         return _maintain(settings, args)
     if args.command == "agent":
         return _agent(settings, args)
+    if args.command == "mcp":
+        return _mcp(settings, args)
 
     parser.print_help()
     return 1

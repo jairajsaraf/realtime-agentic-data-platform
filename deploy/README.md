@@ -68,12 +68,24 @@ compose network only — the port is never published). To enable export on the h
 - run the **deployed image, which includes the optional `[otel]` extra** (CI's `publish-image` builds
   it with `--build-arg RTDP_INSTALL_EXTRAS=otel`);
 - set `RTDP_OTEL_ENABLED=true` and `RTDP_OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4317`;
-- supply `DD_API_KEY` (via Doppler) and `DD_SITE` for the Agent.
+- supply `DD_API_KEY` (via Doppler) and `DD_SITE` for the Agent;
+- set **`DD_HOSTNAME`** to the configured Datadog host label (the deploy uses `rtdp-demo`, which the
+  dashboard and monitors scope to via `host:`). A containerized Agent can't reliably derive its host
+  name on DigitalOcean (no cloud metadata, no mounted Docker socket), so it must be set or the Agent
+  exits.
+
+The Agent also runs an **`http_check`** (`observability/http_check.yaml`, mounted read-only) against
+the API's internal `/health`, emitting the `http.can_connect` service check tagged
+`instance:rtdp_health` — no new host or public surface.
 
 The Agent **requires `DD_API_KEY` to start**, so the `observability` profile is for the deployed host,
 not the default/local path. Telemetry stays **no-op** unless both `RTDP_OTEL_ENABLED=true` and the
 `[otel]` extra are present. **`/health` and CI never depend on Datadog**, and there is **no `/metrics`
 endpoint**.
+
+Import and validate the dashboard/monitors (`observability/dashboard.json`, `observability/monitors.json`)
+against Datadog **US5** per **`observability/README.md`** — reviewable JSON, run by you with your own
+keys, never in CI.
 
 ## Secrets (Doppler or host env)
 
@@ -100,9 +112,10 @@ docker compose -f deploy/docker-compose.yml run --rm maintain
 One-shot, metadata-only snapshot expiration. On a host, schedule via cron/systemd-timer so it does
 not overlap a `stream` commit.
 
-> Note: actual provisioning (droplet, MinIO volume, Doppler/Datadog accounts, DNS) is the separately
-> gated **E6.2** step — see the "Stage E6 go-live" section of `RUNBOOK.md`. These files only prepare
-> the repo; they provision nothing and contain no real secrets.
+> Note: the droplet, MinIO volume, Doppler/Datadog accounts, and DNS are **provisioned and the demo is
+> deployed live** (E6.2–E6.3) — see the "Stage E6 — single-host go-live" and teardown sections of
+> `RUNBOOK.md`. These repo files still **contain no real secrets**; runtime config is injected on the
+> host (Doppler) and the CI deploy credentials live in the GitHub `production` environment.
 
 ## CI/CD
 
@@ -166,3 +179,11 @@ git fetch origin main
 git checkout <approved-sha>      # or: git pull --ff-only  (if tracking main)
 git status --short               # expect clean
 ```
+
+## Teardown
+
+Full teardown and cost control are documented in `RUNBOOK.md` ("Teardown & cost control"). Two things
+to do **first**, before the host goes away: remove the **Live demo** callout from the repo `README.md`
+and clear the live URL from the **GitHub About** description, so the docs never advertise an offline
+demo. Then destroy the droplet — that, not `docker compose down`, is what stops billing — and revoke
+the Doppler host token.

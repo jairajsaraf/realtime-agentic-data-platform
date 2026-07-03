@@ -290,20 +290,24 @@ on it**.
 `telemetry-otel` run on every push + PR with **no secrets**; `publish-image` pushes to GHCR via the
 built-in `GITHUB_TOKEN` on `main` only; `deploy` (push to `main`, `environment: production`) is a
 **real, gated SSH deploy** — protected by the `production` environment (required reviewers) and run
-only on manual approval. Provisioning the host + secrets and approving the first deploy are the
-separately-gated E6.2 step — **nothing has been provisioned or deployed in E6.1**.
+only on manual approval. The host, secrets, and observability backend are **provisioned and the demo
+is deployed live** (E6.2–E6.3); a checkout-alignment guard keeps an approved image from running
+against a stale host checkout (see below).
 
 ---
 
-## Stage E6 — go-live (gated)
+## Stage E6 — single-host go-live
 
-**Honest status:** this repo prep is **E6.1 — repo-side automation and docs only** (Caddy/Datadog
-compose profiles, host bootstrap + deploy scripts, the `[otel]` image build path, and a real but
-**gated** SSH deploy job). **Nothing is provisioned and there is no live demo URL yet.** Provisioning +
-first deploy is **E6.2**, observability go-live is **E6.3**, docs/clean is **E6.4** — each separately
-approved. The public demo, when it exists, serves **synthetic data only**.
+**Status: live.** E6.1 (repo-side automation + Caddy/Datadog compose profiles, host bootstrap +
+deploy scripts, the `[otel]` image build path, and a real gated SSH deploy job), **E6.2**
+(provisioning + first deploy), and **E6.3** (observability go-live) are **complete**. The single-host
+demo is live at **[demo.agentic-data-platform.me](https://demo.agentic-data-platform.me)** — a
+read-only API over automatic HTTPS, **synthetic data only** — with the OpenTelemetry → Datadog
+boundary validated in Datadog US5 (traces under `service:rtdp`, `/health` service check green). The
+deploy stays **gated** (protected `production` environment). This section documents the go-live and
+its operations; teardown and cost control are at the end.
 
-### Architecture (target, after E6.2)
+### Architecture (as deployed)
 
 ```
                          Internet
@@ -374,6 +378,26 @@ approved. The public demo, when it exists, serves **synthetic data only**.
 > and store the `known_hosts` line as the **`DEPLOY_SSH_KNOWN_HOSTS`** secret so the deploy verifies
 > against it and the first CI connection can't be spoofed.
 
+### E6.3 — observability go-live
+
+With the host up, the `observability` profile runs a **Datadog Agent** that receives app traces over
+**OTLP gRPC on `datadog-agent:4317`** (internal to the compose network only — never published) and
+runs an HTTP check against the API's internal `/health`:
+
+- **`DD_HOSTNAME`** — set to the configured Datadog host label (the deploy uses `rtdp-demo`, which the
+  dashboard and monitors scope to via `host:`). A containerized Agent otherwise can't reliably
+  determine its host name on DigitalOcean (no cloud metadata, no mounted Docker socket) and would exit.
+- **`http_check`** (`deploy/observability/http_check.yaml`, mounted read-only into the Agent) emits the
+  **`http.can_connect`** service check tagged **`instance:rtdp_health`** against
+  `http://api:8000/health` — no new host or public surface.
+- **Import + validate** the dashboard and monitors from `deploy/observability/` against Datadog **US5**
+  — the import steps and validated metric names are in **`deploy/observability/README.md`** (run by you
+  with your own keys; never in CI). Traces appear under `service:rtdp`; validate every query in the US5
+  UI before relying on it.
+
+`DD_API_KEY` / `DD_SITE` are injected from Doppler at run time. **`/health` and CI never depend on
+Datadog**, and there is no `/metrics` endpoint.
+
 ### Local verification (no cloud, no real keys)
 
 ```powershell
@@ -393,16 +417,26 @@ an E6.3 concern.
 
 ### Teardown & cost control
 
-- **Stop services (keep host):** on the host, `doppler run -- docker compose -f
-  deploy/docker-compose.yml down` (add `-v` to also drop volumes).
-- **Destroy the droplet** (stops all burn — the single biggest cost lever): DigitalOcean dashboard →
-  Droplet → Destroy.
-- **Prune images/volumes:** `docker system prune -a` and `docker volume prune` on the host.
-- **Remove DNS:** delete the Namecheap A-record.
-- **Remove deploy access:** delete the GitHub `production` environment secrets, rotate the
-  `DEPLOY_SSH_KEY`, and remove the deploy user's authorized key if retiring the host.
+Do these in order to fully stop the demo and its billing:
+
+- **Remove the advertised demo URL first:** delete the **Live demo** callout from `README.md` and clear
+  the live URL from the **GitHub About** description, so the docs never advertise a demo that is about
+  to go offline. (README is a docs-only edit; the About field is a GitHub UI change.)
+- **Destroy the droplet — this is what stops billing.** DigitalOcean dashboard → Droplet → Destroy.
+  **Note:** `docker compose ... down` (even with `-v`) only stops the containers/volumes on the host;
+  it does **NOT** stop droplet billing. Only destroying the droplet does.
+- **Stop services first if keeping the host:** on the host, `doppler run -- docker compose -f
+  deploy/docker-compose.yml down` (add `-v` to also drop volumes); `docker system prune -a` and
+  `docker volume prune` to reclaim space.
+- **Revoke secrets:** revoke the **Doppler host service token** (and rotate any exposed `RTDP_*` /
+  `DD_API_KEY` values); rotate the `DEPLOY_SSH_KEY` and remove the deploy user's authorized key if
+  retiring the host.
+- **GitHub secret cleanup (optional):** delete the `production` environment secrets.
+- **Datadog cleanup (optional):** delete the imported dashboard and monitors; the Agent stops
+  reporting once the droplet is gone.
+- **DNS decision:** delete the Namecheap A-record (or keep it parked if you plan to redeploy).
 - **Watch credit burn:** the DigitalOcean **Billing** page; pick the **smallest viable droplet**.
-  *(Exact monthly cost — fill in from DigitalOcean's official pricing page when sizing; not asserted
+  *(Exact monthly cost — read it from DigitalOcean's official pricing page when sizing; not asserted
   here.)*
 
 ### Security notes
@@ -412,7 +446,7 @@ an E6.3 concern.
   `DD_API_KEY` live in Doppler.
 - **Caddy handles TLS** (automatic Let's Encrypt); the **Namecheap bundled SSL certificate is unused**.
 - **`/health` and CI never depend on** NVIDIA, Datadog, Doppler, MinIO, or the internet.
-- **Datadog/observability requires a real `DD_API_KEY`** and is only wired live in **E6.3**.
+- **Datadog/observability requires a real `DD_API_KEY`** (from Doppler) and is wired live as of **E6.3**.
 - The API's port 8000 is bound to **127.0.0.1** on the host (Caddy fronts it); UFW allows only
   22/80/443 inbound.
 
@@ -447,8 +481,9 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
       tests are green with no network/keys; the live eval harness is opt-in (never in CI)
 - [ ] Stage E: one Docker image with `serve`/`stream`/`maintain`/`agent` entrypoints; single-host
       compose up; `bash scripts/docker_smoke.sh` returns `/health` 200; telemetry stays no-op unless
-      `RTDP_OTEL_ENABLED` + the `[otel]` extra; CI publishes to GHCR on `main` and `deploy` is a
-      gated no-op (no provisioning done)
+      `RTDP_OTEL_ENABLED` + the `[otel]` extra; CI publishes to GHCR on `main` and runs a **real,
+      gated** SSH deploy — the single-host demo is deployed live behind Caddy TLS with the
+      OpenTelemetry → Datadog boundary validated (synthetic data only)
 
 ## Known limitations
 
@@ -477,9 +512,12 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
   volume** (single-writer; one `stream`). The telemetry boundary is **no-op unless** `RTDP_OTEL_ENABLED`
   is set **and** the `[otel]` extra is installed; nothing is exported during tests, and there is **no
   `/metrics` endpoint**. The deployed demo serves **synthetic data only**; the agent LLM is external/
-  config-driven (NVIDIA Build/NIM intended) and never gates CI or `/health`. `deploy` is a gated
-  no-op — **no host / MinIO volume / secrets manager / observability backend has been provisioned**.
+  config-driven (NVIDIA Build/NIM intended) and never gates CI or `/health`. `deploy` is a **real,
+  gated** SSH deploy; the single-host stack is **provisioned and running live** behind Caddy TLS with
+  the OpenTelemetry → Datadog boundary validated — but it stays **single-host** (multi-host /
+  Kubernetes / real-AWS remains out of scope).
 - **Out of scope:** true streaming (Kafka/Flink), RAG/vector search, fine-tuning, autonomous
-  remediation (the Stage D agent proposes; a human applies), orchestration, dashboards, real
+  remediation (the Stage D agent proposes; a human applies), orchestration, **product/business-facing
+  analytics and operational dashboards** (beyond the live E6.3 Datadog observability dashboard), real
   provisioned / multi-host (Kubernetes) deployment, production IAM.
 ```

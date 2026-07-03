@@ -2,19 +2,28 @@
 
 [![codecov](https://codecov.io/github/jairajsaraf/realtime-agentic-data-platform/graph/badge.svg?token=PX1S7LTMYW)](https://codecov.io/github/jairajsaraf/realtime-agentic-data-platform)
 
-A locally reproducible data platform built **stage by stage**. Today it pairs an
-[Apache Iceberg](https://iceberg.apache.org/) lakehouse (**Stage 1**) with a read-only FastAPI
-serving layer (**Stage 2A**), scheduled micro-batch ingestion (**Stage 2B**), and a
-natural-language **agent** that answers questions and diagnoses data quality by calling that read
-API as its tools (**Stage D**).
+> **🟢 Live demo — [demo.agentic-data-platform.me](https://demo.agentic-data-platform.me)**
+> The read-only serving API runs live over automatic HTTPS on a single-host deployment, serving
+> **synthetic** flight data. Explore the interactive OpenAPI docs at
+> [`/docs`](https://demo.agentic-data-platform.me/docs) or check
+> [`/health`](https://demo.agentic-data-platform.me/health).
+
+A locally reproducible data platform built **stage by stage**, now running as a live single-host
+demo. It pairs an [Apache Iceberg](https://iceberg.apache.org/) lakehouse (**Stage 1**) with a
+read-only FastAPI/DuckDB serving layer (**Stage 2A**), scheduled near-real-time micro-batch
+ingestion (**Stage 2B**), and a natural-language **agent** that answers questions and diagnoses
+data quality by calling that read API as its tools (**Stage D**). **Stage E** productionizes the
+whole thing: one multi-entrypoint container image, a single-host go-live behind **Caddy** automatic
+HTTPS, an optional **OpenTelemetry → Datadog** observability boundary (off by default locally), and
+a CI/CD path of **docker-smoke → GHCR publish → gated SSH deploy**.
 
 > "Real-time" and "agentic" name the platform's **direction** — the words now have honest, narrow
 > backing, not their maximal meaning. "Real-time" is **scheduled micro-batch** ingestion into a
 > real Iceberg table (near-real-time, **not** true Kafka/Flink streaming). "Agentic" is a
 > **read-only, human-in-the-loop** agent over the typed HTTP API — it proposes remediations but
 > never mutates data, and there is no autonomous action, RAG, or fine-tuning. True streaming,
-> RAG/vector search, and dashboards remain **not built yet** (see
-> [Out of scope & roadmap](#out-of-scope--roadmap)).
+> RAG/vector search, and product-facing analytics dashboards remain **not built yet** (the E6.3
+> Datadog *observability* dashboard is live; see [Out of scope & roadmap](#out-of-scope--roadmap)).
 
 ## Project status
 
@@ -24,8 +33,8 @@ API as its tools (**Stage D**).
 | **Stage 2A — read-only serving layer** | ✅ Complete | A FastAPI service over the bronze table: typed flight reads, geographic bounding-box, interval aggregations, and Iceberg time-travel, behind an auto-generated OpenAPI schema. |
 | **Stage 2B — incremental micro-batch ingestion** | ✅ Complete | A scheduled `rtdp stream` loop that polls a source and appends micro-batches via the existing writer (within-batch dedup, skip-empty, read-time latest-state view, opt-in snapshot expiration). Near-real-time micro-batch — **not** true streaming. |
 | **Stage D — agentic layer** | ✅ Complete | A natural-language agent (`rtdp agent`) that answers flight questions and diagnoses data quality by calling the Stage 2A HTTP API as tools. Strictly read-only and human-in-the-loop — proposes remediations, never mutates. Deterministic fake-LLM tests; opt-in live eval harness. |
-| **Stage E — productionization & observability** | 🚧 In progress | One Docker image (multi-entrypoint: serve/stream/maintain/agent), a single-host Docker Compose topology (file:// or self-hosted MinIO via the `aws` backend), an optional telemetry boundary (`[otel]` extra, no-op by default), and a CI/CD pipeline that smoke-tests the image, publishes to GHCR on `main`, and gates a **no-op** `deploy`. **Ops-only and additive** — no new data features or endpoints; deployment is a protected-environment no-op (no provisioning has been done). |
-| **Later stages** | ⬜ Planned | True streaming (Kafka/Flink), RAG/vector search, fine-tuning, orchestration, dashboards, real-AWS / multi-host (Kubernetes) deployment. |
+| **Stage E — productionization & observability** | ✅ Complete | One Docker image (multi-entrypoint: serve/stream/maintain/agent) deployed live to a single host: **Caddy** fronts the read-only API with automatic Let's Encrypt HTTPS, `stream` appends synthetic micro-batches, and an optional **OpenTelemetry → Datadog** boundary (`[otel]` extra, no-op by default locally) reports traces and a `/health` service check. CI/CD smoke-tests the image, publishes it to GHCR on `main`, and runs a **real, gated** SSH deploy (protected `production` environment). **Ops-only and additive** — no new data features or endpoints (no `/metrics`); the public demo serves **synthetic data only**. |
+| **Later stages** | ⬜ Planned | True streaming (Kafka/Flink), RAG/vector search, fine-tuning, orchestration, product/analytics dashboards (beyond the live Datadog observability dashboard), real-AWS / multi-host (Kubernetes) deployment. |
 
 ## Architecture
 
@@ -430,13 +439,24 @@ backend**, so the host is **single-writer** — run one `stream` replica and sch
 to overlap it.
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d --build            # file:// (no secrets)
-docker compose -f deploy/docker-compose.yml --profile s3 up -d       # self-hosted MinIO
+docker compose -f deploy/docker-compose.yml up -d --build                   # file:// (no secrets)
+docker compose -f deploy/docker-compose.yml --profile s3 up -d              # self-hosted MinIO
+docker compose -f deploy/docker-compose.yml --profile edge up -d            # + Caddy TLS edge
+docker compose -f deploy/docker-compose.yml --profile observability up -d   # + Datadog Agent (needs DD_API_KEY)
 ```
 
 Object storage is config-driven: set `RTDP_STORAGE_BACKEND=aws` and point `RTDP_S3_ENDPOINT_URL`
 at the MinIO service to use an S3-compatible store (real AWS stays the default when no endpoint is
 set — see `deploy/README.md`). The MinIO console binds to `127.0.0.1` only.
+
+### Edge, TLS & single-host go-live
+
+On the public host the `edge` profile runs **Caddy**, which terminates TLS with an automatically
+provisioned/renewed **Let's Encrypt** certificate and reverse-proxies the public hostname
+(`RTDP_PUBLIC_HOSTNAME`) to the internal `api:8000`. The API's own port is bound to `127.0.0.1`
+(`RTDP_API_BIND`), so only Caddy is internet-facing and UFW allows just `22/80/443`. This is what
+backs the **live demo at [demo.agentic-data-platform.me](https://demo.agentic-data-platform.me)** —
+synthetic data only.
 
 ### Telemetry boundary (no-op by default)
 
@@ -455,6 +475,13 @@ Settings (all under the existing `RTDP_*` / `Settings` surface): `RTDP_OTEL_ENAB
 collector or the Datadog Agent), `RTDP_LOG_FORMAT` (`text`|`json`), `RTDP_LOG_LEVEL`. There is **no
 `/metrics` scrape endpoint**.
 
+On the deployed host the `observability` profile runs a **Datadog Agent** that receives traces over
+**OTLP gRPC on `4317` (internal to the compose network only — never published)** and runs an HTTP
+check against the API's internal `/health`. Traces land under `service:rtdp`, and the dashboard plus
+the `/health` service check are validated live (Datadog US5) — see `deploy/observability/README.md`.
+Export stays fully optional: **`/health` and CI never depend on Datadog**, and there is still no
+`/metrics` endpoint.
+
 ### CI/CD
 
 `.github/workflows/ci.yml` keeps image validation, publishing, and deployment separate and
@@ -467,9 +494,12 @@ least-privilege (top-level `permissions: contents: read`):
   uploads coverage so the OTel-enabled branches are measured. Key-free.
 - **`publish-image`** (push to `main` only) — builds and pushes `ghcr.io/<owner>/<repo>:<sha>` and
   `:latest` using the built-in `GITHUB_TOKEN` (`packages: write`). No external secret.
-- **`deploy`** (push to `main` only; `environment: production`) — a **no-op placeholder**. Real
-  deployment is intentionally not wired; the protected `production` environment and its required
-  reviewers are configured manually in repo settings, and a real deploy is separately approved.
+- **`deploy`** (push to `main` only; `environment: production`) — a **real, gated SSH deploy**. It
+  runs only after a required reviewer approves the protected `production` environment, then SSHes to
+  the host and runs `deploy/host_deploy.sh` (compose pull + up + `/health` check). A
+  checkout-alignment guard aborts before deploy unless the host checkout matches the approved commit
+  SHA and is clean, so a new image never runs against stale host-side compose/config. See
+  `deploy/README.md` and `RUNBOOK.md`.
 
 ### Secrets & the agent LLM
 
@@ -479,10 +509,11 @@ Python Doppler dependency**. The agent's model stays **external and config-drive
 OpenAI-compatible boundary (NVIDIA Build/NIM is the intended option) — **not** self-hosted, no
 GPU/inference provisioning, and **neither CI nor `/health` ever depends on it**.
 
-> Stage E status: E1 (image) → E2 (telemetry boundary) → E3 (deploy assets) → E4 (CI/CD scaffold)
-> → E5 (docs) are in place. **No host, MinIO volume, secrets manager, or observability backend has
-> been provisioned**; the `production` environment, deploy secrets, and the real deploy mechanism
-> are deferred and separately gated.
+> Stage E status: **complete and live.** E1 (image) → E2 (telemetry boundary) → E3 (deploy assets)
+> → E4 (CI/CD) → E5 (docs) → E6 (single-host go-live) are all in place: the stack is provisioned and
+> deployed on one always-on host behind Caddy TLS, with the OpenTelemetry → Datadog observability
+> boundary validated live. The demo serves **synthetic data only**; multi-host / Kubernetes /
+> real-AWS deployment remains out of scope (see [roadmap](#out-of-scope--roadmap)).
 
 ---
 
@@ -500,9 +531,12 @@ integration job against LocalStack S3. See `RUNBOOK.md` for a step-by-step fresh
 
 **Not built yet (intentionally):** true streaming (Kafka/Flink), RAG / vector search, model
 fine-tuning, autonomous remediation (the Stage D agent *proposes*; a human applies), orchestration,
-dashboards, **real provisioned cloud / multi-host (Kubernetes) deployment**, production IAM, and
-data-file compaction. (Stage E adds **single-host containerization + a gated CI/CD scaffold**, but
-performs no provisioning and keeps `deploy` a no-op — see [Stage E](#stage-e--productionization--observability).)
+**product/business-facing analytics and operational dashboards** (beyond the live E6.3 Datadog
+*observability* dashboard), **real provisioned cloud / multi-host (Kubernetes) deployment**,
+production IAM, and data-file compaction. (Stage E ships **single-host containerization + a real gated CI/CD deploy**,
+now live on one host behind Caddy TLS with Datadog observability — see
+[Stage E](#stage-e--productionization--observability). **Multi-host / Kubernetes / real-AWS /
+production-IAM deployment stays out of scope.**)
 The table/partition design anticipates continued appends without a rewrite, and the read API
 doubles as the agent's tool surface.
 
@@ -512,5 +546,6 @@ doubles as the agent's tool surface.
   micro-batch loop.
 - **Retrieval (RAG) / vector search** and **richer agent autonomy** beyond the current read-only,
   human-in-the-loop agent.
-- **Orchestration & dashboards**, then **real provisioned / multi-host deployment** beyond Stage
-  E's single-host containerized demo (real AWS S3 is already a config-only swap).
+- **Orchestration & product/analytics dashboards** (beyond the live Datadog *observability*
+  dashboard), then **real provisioned / multi-host deployment** beyond Stage E's single-host
+  containerized demo (real AWS S3 is already a config-only swap).

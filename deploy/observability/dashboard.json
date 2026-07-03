@@ -49,10 +49,11 @@
     {
       "definition": {
         "type": "check_status",
-        "title": "/health check status",
         "check": "http.can_connect",
-        "grouping": "check",
-        "tags": ["instance:rtdp_health"]
+        "grouping": "cluster",
+        "group_by": ["host"],
+        "tags": ["instance:rtdp_health"],
+        "title": "/health check status"
       }
     }
   ]

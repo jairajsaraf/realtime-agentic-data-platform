@@ -476,6 +476,20 @@ Settings (all under the existing `RTDP_*` / `Settings` surface): `RTDP_OTEL_ENAB
 collector or the Datadog Agent), `RTDP_LOG_FORMAT` (`text`|`json`), `RTDP_LOG_LEVEL`. There is **no
 `/metrics` scrape endpoint**.
 
+Two custom spans are emitted through this boundary (and, like everything above, only when
+`RTDP_OTEL_ENABLED=true` **and** the `[otel]` extra are active — otherwise the wrapping is a
+dependency-free no-op):
+
+- **`rtdp.ingest.batch`** wraps each micro-batch append in `run_ingest` (so it covers both `rtdp
+  ingest` and `rtdp stream`), with attributes `rows_in`, `rows_written`, and `ingest.lag_seconds`
+  (ingest wall-clock minus the newest `last_contact` in the batch — data staleness at write time).
+  A DQ-FAIL batch writes nothing and emits no span.
+- **`rtdp.agent.tool_call`** wraps every `ApiToolExecutor.execute` call, with attributes `name`
+  (the tool), `http.status_code`, `ok`, and `error`; the span duration is the tool-call latency.
+
+Both stay off by default and, when enabled, export over OTLP to **Datadog APM** (traces under
+`service:rtdp`). They add no new dependency, setting, endpoint, or metric.
+
 On the deployed host the `observability` profile runs a **Datadog Agent** that receives traces over
 **OTLP gRPC on `4317` (internal to the compose network only — never published)** and runs an HTTP
 check against the API's internal `/health`. Traces land under `service:rtdp`, and the dashboard plus

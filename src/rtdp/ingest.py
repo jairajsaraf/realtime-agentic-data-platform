@@ -18,6 +18,7 @@ from .config import Settings
 from .dq import DQReport, run_dq
 from .schema import BRONZE_SCHEMA, INITIAL_SPEC
 from .sources.base import Source
+from .telemetry import span
 from .transforms import bronze_rows_to_arrow, raw_records_to_bronze
 
 
@@ -37,6 +38,28 @@ def _snapshot_state(catalog, identifier: str) -> tuple[int | None, int]:
     table = catalog.load_table(identifier)
     current = table.current_snapshot()
     return (current.snapshot_id if current else None), len(table.metadata.snapshots)
+
+
+_NUMERIC_TYPES = (int, float)
+
+
+def _ingest_lag_seconds(ingest_time: datetime, rows: list[dict]) -> float | None:
+    """Data staleness at write time: ingest wall-clock minus the newest ``last_contact`` in the
+    batch, in seconds. Returns ``None`` (attribute omitted) for an empty batch, or when ANY row is
+    missing ``last_contact`` or carries a non-numeric/bool value — the lag is computed only when
+    every row has a valid numeric ``last_contact`` (never from a partial batch). Never raises."""
+    try:
+        if not rows:
+            return None
+        contacts = []
+        for row in rows:
+            value = row.get("last_contact")
+            if not isinstance(value, _NUMERIC_TYPES) or isinstance(value, bool):
+                return None
+            contacts.append(value)
+        return ingest_time.timestamp() - max(contacts)
+    except Exception:
+        return None
 
 
 def run_ingest(
@@ -65,7 +88,11 @@ def run_ingest(
     table = catalog.create_table_if_not_exists(
         identifier, schema=BRONZE_SCHEMA, partition_spec=INITIAL_SPEC
     )
-    table.append(bronze_rows_to_arrow(rows))
+    lag_seconds = _ingest_lag_seconds(ingest_time, rows)
+    arrow_batch = bronze_rows_to_arrow(rows)  # convert outside the span; the span times only append
+    with span("rtdp.ingest.batch", rows_in=len(rows), rows_written=len(rows)) as ingest_span:
+        ingest_span.set_attribute("ingest.lag_seconds", lag_seconds)  # None omitted by guard
+        table.append(arrow_batch)
 
     snapshot_id, count = _snapshot_state(catalog, identifier)
     return IngestResult(identifier, len(rows), len(rows), report, snapshot_id, count)

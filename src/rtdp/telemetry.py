@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from .config import LogFormat
@@ -137,3 +140,87 @@ def instrument_fastapi(app: FastAPI, settings: Settings) -> bool:
         return False
     FastAPIInstrumentor.instrument_app(app)
     return True
+
+
+# --- custom spans -------------------------------------------------------------------------
+# A tiny span seam so ingestion/agent code can emit OpenTelemetry spans through this boundary
+# without any `if otel_enabled` at the call site and without importing opentelemetry when the
+# boundary is off. OTel attribute values must be scalar; anything else (or None) is skipped.
+_SCALAR_ATTR_TYPES = (str, bool, int, float)
+
+
+class _NoopSpan:
+    """Do-nothing span for the disabled/fallback path — imports nothing from opentelemetry."""
+
+    def set_attribute(self, key: str, value: object) -> None:
+        return None
+
+
+_NOOP_SPAN = _NoopSpan()
+
+
+class _SafeSpan:
+    """Wraps a real OTel span so ``set_attribute`` never raises into caller code.
+
+    Skips ``None`` and non-scalar values and swallows+logs any error from the underlying span —
+    instrumentation must never change the wrapped code's behavior.
+    """
+
+    def __init__(self, otel_span: object) -> None:
+        self._span = otel_span
+
+    def set_attribute(self, key: str, value: object) -> None:
+        if value is None or not isinstance(value, _SCALAR_ATTR_TYPES):
+            return
+        try:
+            self._span.set_attribute(key, value)
+        except Exception:
+            get_logger(__name__).debug("failed to set span attribute %r", key, exc_info=True)
+
+
+@contextmanager
+def span(name: str, **attrs: object) -> Iterator[_NoopSpan | _SafeSpan]:
+    """Emit an OpenTelemetry span named ``name`` when tracing is ready; a no-op otherwise.
+
+    Callers wrap code unconditionally::
+
+        with span("rtdp.ingest.batch", rows_in=n) as s:
+            s.set_attribute("rows_written", n)   # late attribute, known only at the end
+            ...                                   # the wrapped work
+
+    The yielded object always exposes ``set_attribute(key, value)`` (``None``/non-scalar values
+    are skipped). When tracing is off this is a one-boolean-check no-op that imports **nothing**
+    from opentelemetry. Instrumentation errors (span setup, attribute, or teardown) are swallowed
+    and logged; exceptions raised by the wrapped body propagate unchanged — even if the span
+    teardown also fails, the caller still receives the original body exception.
+    """
+    if not _tracing_ready:
+        yield _NOOP_SPAN
+        return
+    try:
+        from opentelemetry import trace
+
+        cm = trace.get_tracer(_LOGGER_NAME).start_as_current_span(name)
+        otel_span = cm.__enter__()  # actually starts the span (sampler/processors run here)
+    except Exception:
+        get_logger(__name__).warning(
+            "failed to start span %r; continuing without tracing", name, exc_info=True
+        )
+        yield _NOOP_SPAN
+        return
+    # Span started cleanly. No `except` around the yield: a wrapped-body exception propagates
+    # unchanged and, via sys.exc_info() in the finally, is handed to cm.__exit__ so the span can
+    # record it. The finally's own try/except swallows+logs any OTel teardown/processor error so it
+    # neither escapes nor replaces the body's exception (which keeps propagating from the try).
+    try:
+        safe = _SafeSpan(otel_span)
+        for key, value in attrs.items():
+            safe.set_attribute(key, value)
+        yield safe
+    finally:
+        try:
+            cm.__exit__(*sys.exc_info())
+        except Exception:
+            get_logger(__name__).debug(
+                "error ending span %r; ignoring instrumentation failure", name, exc_info=True
+            )

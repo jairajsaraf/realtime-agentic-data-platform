@@ -18,6 +18,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from ..telemetry import span
 from . import dq
 
 if TYPE_CHECKING:
@@ -302,6 +303,15 @@ def _validate_args(tool: ApiTool, arguments: dict) -> tuple[bool, dict, str | No
     return True, cleaned, None
 
 
+def _annotate_tool_span(tool_span, result: ToolResult) -> None:
+    """Set the ``rtdp.agent.tool_call`` span attributes from a completed :class:`ToolResult`."""
+    tool_span.set_attribute("name", result.tool_name)
+    tool_span.set_attribute("ok", result.ok)
+    tool_span.set_attribute("http.status_code", result.status_code)  # None skipped by the guard
+    if result.error:
+        tool_span.set_attribute("error", result.error)
+
+
 class ApiToolExecutor:
     """Runs tool calls as read-only HTTP GETs against the read API and normalizes results."""
 
@@ -319,6 +329,14 @@ class ApiToolExecutor:
         self._max_rows = max_rows
 
     def execute(self, name: str, arguments: dict) -> ToolResult:
+        # One span per tool execution, covering every return path below. The result is unchanged;
+        # attributes are read from it just before returning (see _annotate_tool_span).
+        with span("rtdp.agent.tool_call") as tool_span:
+            result = self._run_tool(name, arguments)
+            _annotate_tool_span(tool_span, result)
+            return result
+
+    def _run_tool(self, name: str, arguments: dict) -> ToolResult:
         tool = self._registry.get(name)
         if tool is None:
             return ToolResult(

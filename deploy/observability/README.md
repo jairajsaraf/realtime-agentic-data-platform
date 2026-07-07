@@ -35,6 +35,9 @@ curl -X POST "https://api.${DD_SITE}/api/v1/dashboard" \
 ## Notes
 
 - **No Terraform** — plain JSON, intentionally reviewable in a PR.
+- **Custom spans** (when `RTDP_OTEL_ENABLED=true` + the `[otel]` extra): `rtdp.ingest.batch`
+  (ingestion lag + row counts) and `rtdp.agent.tool_call` (tool name/status/latency) surface in APM
+  under `service:rtdp` on host `rtdp-demo`. `/health` and CI never depend on this.
 - Live metric names (confirmed in US5): request rate uses `trace.http.server.request.hits`; latency uses
   the `trace.http.server.request` **distribution** metric (percentiles enabled, e.g. `p50:`/`p95:`).
   `trace.http.server.request.errors` is **absent**, so the 5xx dashboard widget uses

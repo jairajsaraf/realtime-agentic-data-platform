@@ -90,9 +90,11 @@ This **single loop both imports the monitors and records their IDs**: it `POST`s
 same iteration. Do **not** run a second creation loop; a repeat `POST` creates duplicate monitors (see
 Section 4).
 
-Authenticate with environment-variable references only. `curl --fail-with-body` under `set -euo
-pipefail` makes any `4xx`/`5xx` response **stop the loop** rather than be mistaken for success. The
-operator-record path is configurable and defaults to a file **outside this repository**:
+Authenticate with environment-variable references only. Each `POST` response is **captured first**, and
+only after `curl --fail-with-body` reports success is the `{id, name, type}` summary extracted and
+appended — so a `4xx`/`5xx` error body **never reaches the record**. On failure the error body is
+printed to stderr and the loop exits (`set -euo pipefail`). The operator-record path is configurable
+and defaults to a file **outside this repository**:
 
 ```bash
 set -euo pipefail
@@ -103,24 +105,42 @@ MONITOR_IDS_FILE="${MONITOR_IDS_FILE:-$HOME/rtdp-monitor-ids.local.jsonl}"
 : > "$MONITOR_IDS_FILE"   # initialize/truncate so IDs from a prior run are not mixed in
 
 jq -c '.[]' deploy/observability/monitors.json | while read -r monitor; do
-  curl -sS --fail-with-body -X POST "https://api.${DD_SITE}/api/v1/monitor" \
-    -H "Accept: application/json" \
-    -H "Content-Type: application/json" \
-    -H "DD-API-KEY: ${DD_API_KEY}" \
-    -H "DD-APPLICATION-KEY: ${DD_APP_KEY}" \
-    -d "$monitor" \
-  | jq '{id, name, type}' \
-  | tee -a "$MONITOR_IDS_FILE"
+  response=""
+
+  if ! response="$(
+    curl -sS --fail-with-body -X POST "https://api.${DD_SITE}/api/v1/monitor" \
+      -H "Accept: application/json" \
+      -H "Content-Type: application/json" \
+      -H "DD-API-KEY: ${DD_API_KEY}" \
+      -H "DD-APPLICATION-KEY: ${DD_APP_KEY}" \
+      -d "$monitor"
+  )"; then
+    printf 'Datadog monitor creation failed:\n%s\n' "$response" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$response" \
+    | jq -ce '
+        if (.id == null or .name == null or .type == null)
+        then error("response missing id, name, or type")
+        else {id, name, type}
+        end
+      ' \
+    | tee -a "$MONITOR_IDS_FILE"
 done
 ```
 
 Notes:
 - One monitor object per request (`jq -c '.[]'` emits each array element on its own line); each is
-  `POST`ed **once**, and `tee -a` both prints the `{id, name, type}` summary and appends it to
-  `MONITOR_IDS_FILE` in the same iteration — there is no second `POST`.
+  `POST`ed **once**. The response is captured, checked for success, and only then does `jq -ce` emit
+  the compact one-line `{id, name, type}` summary that `tee -a` prints and appends to
+  `MONITOR_IDS_FILE` — there is no second `POST`.
+- `jq -c` keeps each recorded summary on **exactly one line**, preserving the JSON Lines contract; `jq
+  -e` makes a nominally successful response missing `id`, `name`, or `type` fail the pipeline instead of
+  writing a bogus record.
 - Do **not** add `set -x` or otherwise echo/log the header values — that would print your credentials.
-- On a non-2xx response, `--fail-with-body` prints Datadog's error body and the pipeline returns
-  non-zero, so `set -euo pipefail` halts before the next object is sent.
+- On a failed `POST`, `curl --fail-with-body` returns non-zero, so the `if` guard prints Datadog's
+  error body to **stderr** and the loop exits **before** anything is written to the record.
 
 ### 4. The operator record of returned IDs
 

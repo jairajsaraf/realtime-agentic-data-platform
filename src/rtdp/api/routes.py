@@ -20,6 +20,7 @@ from ..config import Settings
 from .models import (
     FlightsResponse,
     HealthResponse,
+    LivenessResponse,
     MetaResponse,
     SnapshotItem,
     StatsResponse,
@@ -70,9 +71,18 @@ AsOfTsQ = Annotated[
 
 
 # ------------------------------------------------------------------------ routes
+@router.get("/livez", response_model=LivenessResponse, tags=["meta"])
+def livez() -> LivenessResponse:
+    """Liveness: 200 whenever the process is serving. Deliberately touches no catalog, table,
+    object storage, or other external state, so a fresh host with no table yet still passes the
+    Docker healthcheck and the deploy gate WITHOUT starting ingestion. Data readiness stays on
+    /health (503 until the catalog + table are loadable)."""
+    return LivenessResponse()
+
+
 @router.get("/health", response_model=HealthResponse, tags=["meta"])
 def health(request: Request, response: Response) -> HealthResponse:
-    """Liveness/readiness: 200 when catalog + table are reachable, 503 otherwise."""
+    """Readiness: 200 when catalog + table are reachable, 503 otherwise."""
     res = query.health(get_settings(request))
     if res.status != "ok":
         response.status_code = 503

@@ -10,8 +10,8 @@ a single host. **Nothing here provisions cloud resources or contains real secret
   intake).
 - `Caddyfile` — Caddy site config; reverse-proxies the public hostname to the `api` service.
 - `bootstrap_host.sh` — idempotent host prep (Docker, deploy user, UFW). Run once on a new host.
-- `host_deploy.sh` — the host-side deploy action (compose pull + up + `/health` check) the gated CI
-  deploy job invokes over SSH.
+- `host_deploy.sh` — the host-side deploy action (compose pull + up + `/livez` liveness check) the
+  gated CI deploy job invokes over SSH.
 - `.env.example` — placeholder environment; copy to a local, gitignored `.env` or inject via a
   secrets manager. Never commit a real `.env`.
 
@@ -27,7 +27,10 @@ compose-up`) starts only `api`. `api` and `stream` share one volume; the SQLite 
 live on it. The API is on `http://localhost:8000` (`/docs`, `/health`). Until data exists `/health`
 returns 503 — bring up the `ingestion` profile, or seed once with
 `docker compose -f deploy/docker-compose.yml run --rm api ingest --rows 50`, so the first batch creates
-the table and `/health` returns 200.
+the table and `/health` returns 200. The Docker healthcheck and the deploy probe use **`/livez`**
+(liveness — 200 whenever the API process serves, no data required), so a fresh host becomes healthy and
+deploys **without** starting ingestion; **`/health`** stays the readiness check (503 until the table
+loads) that Datadog's `http_check` polls.
 
 ## S3-compatible backend (self-hosted MinIO via the `aws` backend)
 
@@ -187,8 +190,8 @@ Image validation is kept separate from publishing, and publishing separate from 
 - **`deploy`** (push to `main` only; needs lint/unit + LocalStack + smoke + `publish-image`;
   `environment: production`) — a **real, gated SSH deploy**. Raw OpenSSH (no third-party action):
   writes `DEPLOY_SSH_KEY` to a 0600 temp file, pins the host key with `ssh-keyscan`, and runs exactly
-  one remote command — `bash "$DEPLOY_SSH_PATH/deploy/host_deploy.sh"` (compose pull + up + `/health`
-  check). It passes the approved commit as `RTDP_DEPLOY_EXPECTED_SHA=$GITHUB_SHA`, so the host aborts
+  one remote command — `bash "$DEPLOY_SSH_PATH/deploy/host_deploy.sh"` (compose pull + up + `/livez`
+  liveness check). It passes the approved commit as `RTDP_DEPLOY_EXPECTED_SHA=$GITHUB_SHA`, so the host aborts
   before compose if its checkout is stale (see "Checkout alignment" below). No secrets are printed; it
   runs only after a human approves the `production` environment.
 
@@ -208,8 +211,8 @@ Image validation is kept separate from publishing, and publishing separate from 
 The deploy job is wired but **gated**: on a push to `main` it queues against the `production`
 environment and does nothing until a required reviewer approves it in the GitHub UI
 (**Actions → the run → Review deployments → Approve**). On approval it SSHes to the host and runs
-`host_deploy.sh`; the job **fails if the post-deploy `/health` check fails**. Nothing deploys from a
-PR or a feature branch, and CI provisions no infrastructure.
+`host_deploy.sh`; the job **fails if the post-deploy `/livez` liveness check fails**. Nothing deploys
+from a PR or a feature branch, and CI provisions no infrastructure.
 
 ### Checkout alignment (host must match the approved commit)
 `host_deploy.sh` deploys the compose file and mounted config (`docker-compose.yml`,

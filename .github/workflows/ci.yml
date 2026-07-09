@@ -146,16 +146,17 @@ jobs:
           MINIO_ROOT_USER: ci
           MINIO_ROOT_PASSWORD: ci-placeholder
         run: docker compose -f deploy/docker-compose.yml config --quiet
-      # Assert the RTDP_MINIO_DATA_PATH toggle and the stream `ingestion` gate render as intended.
-      # Fail-closed and stdlib-only: renders are parsed with json + direct indexing, so a bad render,
-      # malformed JSON, or a missing field raises (nonzero exit) instead of being silently skipped.
-      - name: Assert MinIO source + stream profile render (fail-closed, stdlib only)
+      # Assert the RTDP_MINIO_DATA_PATH toggle, the stream `ingestion` gate, and the deploy liveness
+      # probe (api healthcheck + DEPLOY_HEALTH_URL default) render/read as intended. Fail-closed and
+      # stdlib-only: renders are parsed with json + direct indexing, so a bad render, malformed JSON,
+      # or a missing field raises (nonzero exit) instead of being silently skipped.
+      - name: Assert MinIO source, stream gate, and deploy liveness probe (fail-closed, stdlib only)
         env:
           MINIO_ROOT_USER: ci
           MINIO_ROOT_PASSWORD: ci-placeholder
         run: |
           python3 - <<'PY'
-          import json, os, subprocess
+          import json, os, pathlib, subprocess
 
           def render(extra_env, *profile_args):
               env = {**os.environ, **extra_env}
@@ -192,6 +193,20 @@ jobs:
           profiles = render({}, "--profile", "ingestion")["services"]["stream"]["profiles"]
           assert profiles == ["ingestion"], f"stream.profiles: {profiles!r}"
           print("OK stream: profiles == ['ingestion']")
+
+          # 4) The API healthcheck must probe the liveness endpoint /livez, not readiness /health, so a
+          #    fresh host with no table still becomes healthy without starting ingestion.
+          hc = render({}, "--profile", "s3")["services"]["api"]["healthcheck"]["test"]
+          hc_joined = " ".join(hc) if isinstance(hc, list) else str(hc)
+          assert "/livez" in hc_joined, f"api healthcheck must probe /livez: {hc!r}"
+          assert "/health" not in hc_joined, f"api healthcheck must NOT probe /health: {hc!r}"
+          print("OK healthcheck: api probes /livez (not /health)")
+
+          # 5) The deploy probe must keep the DEPLOY_HEALTH_URL name and default to the /livez endpoint.
+          hd = pathlib.Path("deploy/host_deploy.sh").read_text(encoding="utf-8")
+          assert "DEPLOY_HEALTH_URL" in hd, "host_deploy.sh must keep the DEPLOY_HEALTH_URL variable"
+          assert "DEPLOY_HEALTH_URL:-http://127.0.0.1:8000/livez" in hd, "host_deploy.sh must default DEPLOY_HEALTH_URL to /livez"
+          print("OK deploy probe: DEPLOY_HEALTH_URL defaults to /livez")
           PY
 
   # Publish the image to GHCR on main only, using the built-in GITHUB_TOKEN (no external secret).

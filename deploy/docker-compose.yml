@@ -66,12 +66,14 @@ services:
       - rtdp-state:/data
     restart: unless-stopped
     healthcheck:
-      # /health returns 503 until a table exists, 200 once the catalog/table load.
+      # Liveness probe: /livez returns 200 whenever the process serves (no catalog/table access), so a
+      # fresh host with no table yet still becomes healthy without starting ingestion. Data readiness
+      # stays on /health (503 until the table loads) — that is what Datadog's http_check polls.
       test:
         - "CMD"
         - "python"
         - "-c"
-        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/livez', timeout=3).status==200 else 1)"
       interval: 30s
       timeout: 5s
       retries: 3

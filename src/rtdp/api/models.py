@@ -8,6 +8,7 @@ A future Stage D agent can consume the OpenAPI schema directly as tool definitio
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -97,3 +98,9 @@ class HealthResponse(BaseModel):
     table_loadable: bool
     current_snapshot_id: int | None = None
     error: str | None = Field(default=None, description="Failure detail when unhealthy.")
+
+
+class LivenessResponse(BaseModel):
+    """Liveness contract: the process is serving. Never reflects catalog/table/data state."""
+
+    status: Literal["alive"] = "alive"

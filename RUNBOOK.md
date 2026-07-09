@@ -296,7 +296,10 @@ docker compose -f deploy/docker-compose.yml --profile s3 up -d                # 
 The `stream` writer is **opt-in behind the `ingestion` profile**, so a bare `up -d` (and `make
 compose-up`) starts only `api`; `/health` stays 503 until data exists — bring up `ingestion`, or seed
 once with `docker compose -f deploy/docker-compose.yml run --rm api ingest --rows 50`, then it returns
-200. `api` + `stream` share one volume; the API is at http://localhost:8000. For the MinIO path, set
+200. The container healthcheck and the deploy gate probe **`/livez`** (liveness — 200 whenever the API
+process serves, no data needed), so a fresh host becomes healthy and deploys without starting the
+writer; `/health` remains the readiness check that Datadog polls. `api` + `stream` share one volume;
+the API is at http://localhost:8000. For the MinIO path, set
 `RTDP_STORAGE_BACKEND=aws` and point `RTDP_S3_ENDPOINT_URL` at the MinIO service (real AWS stays the
 default when no endpoint is set); MinIO's object-data source is selected by `RTDP_MINIO_DATA_PATH`
 (Compose-only: unset → named volume `minio-data`; an absolute host path → a bind mount — see

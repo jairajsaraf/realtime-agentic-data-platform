@@ -48,6 +48,20 @@ def test_health_ok(client):
     assert body["current_snapshot_id"] == r2.snapshot_id
 
 
+def test_livez_up_without_table(file_settings):
+    """Fresh host / empty warehouse: /livez is 200 (process alive) while /health is 503 (no table
+    yet). This is exactly the deploy-gate case gating the writer created; the deploy probes /livez,
+    so it succeeds without starting ingestion."""
+    app = create_app(file_settings)
+    with TestClient(app) as c:
+        live = c.get("/livez")
+        assert live.status_code == 200
+        assert live.json() == {"status": "alive"}
+        health = c.get("/health")
+        assert health.status_code == 503
+        assert health.json()["status"] == "unavailable"
+
+
 def test_meta(client):
     c, r1, r2 = client
     resp = c.get("/meta")
@@ -161,6 +175,7 @@ def test_openapi_lists_all_endpoints(client):
     c, r1, r2 = client
     paths = set(c.get("/openapi.json").json()["paths"].keys())
     assert {
+        "/livez",
         "/health",
         "/flights",
         "/flights/bbox",

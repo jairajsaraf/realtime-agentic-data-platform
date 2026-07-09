@@ -4,25 +4,33 @@ Local, additive deploy assets for running the existing `rtdp` surfaces from one 
 a single host. **Nothing here provisions cloud resources or contains real secrets.**
 
 - `Dockerfile` (repo root) — one image; entrypoint is the `rtdp` CLI.
-- `docker-compose.yml` — `api` (read API) + `stream` (micro-batch writer), a one-shot `maintain`
-  profile, an `s3` profile (MinIO object storage), an `edge` profile (Caddy reverse proxy + HTTPS),
-  and an `observability` profile (Datadog Agent OTLP intake).
+- `docker-compose.yml` — `api` (read API, always on) + `stream` (micro-batch writer, **opt-in via the
+  `ingestion` profile**), a one-shot `maintain` profile, an `s3` profile (MinIO object storage), an
+  `edge` profile (Caddy reverse proxy + HTTPS), and an `observability` profile (Datadog Agent OTLP
+  intake).
 - `Caddyfile` — Caddy site config; reverse-proxies the public hostname to the `api` service.
 - `bootstrap_host.sh` — idempotent host prep (Docker, deploy user, UFW). Run once on a new host.
-- `host_deploy.sh` — the host-side deploy action (compose pull + up + `/health` check) the gated CI
-  deploy job invokes over SSH.
+- `host_deploy.sh` — the host-side deploy action (compose pull + up + `/livez` liveness check) the
+  gated CI deploy job invokes over SSH.
 - `.env.example` — placeholder environment; copy to a local, gitignored `.env` or inject via a
   secrets manager. Never commit a real `.env`.
 
 ## File:// backend (default — runnable with no secrets)
 
 ```
-docker compose -f deploy/docker-compose.yml up -d --build
+docker compose -f deploy/docker-compose.yml up -d --build                       # api only (no writer)
+docker compose -f deploy/docker-compose.yml --profile ingestion up -d --build   # api + stream writer
 ```
 
-`api` and `stream` share one volume; the SQLite catalog and warehouse live on it. The API is on
-`http://localhost:8000` (`/docs`, `/health`); `/health` returns 503 until the first stream batch
-creates the table, then 200.
+The `stream` writer is **opt-in behind the `ingestion` profile**, so a bare `up -d` (and `make
+compose-up`) starts only `api`. `api` and `stream` share one volume; the SQLite catalog and warehouse
+live on it. The API is on `http://localhost:8000` (`/docs`, `/health`). Until data exists `/health`
+returns 503 — bring up the `ingestion` profile, or seed once with
+`docker compose -f deploy/docker-compose.yml run --rm api ingest --rows 50`, so the first batch creates
+the table and `/health` returns 200. The Docker healthcheck and the deploy probe use **`/livez`**
+(liveness — 200 whenever the API process serves, no data required), so a fresh host becomes healthy and
+deploys **without** starting ingestion; **`/health`** stays the readiness check (503 until the table
+loads) that Datadog's `http_check` polls.
 
 ## S3-compatible backend (self-hosted MinIO via the `aws` backend)
 
@@ -41,6 +49,53 @@ MinIO without any LocalStack involvement (real AWS remains the default when no e
 The MinIO **console is bound to `127.0.0.1:9001` (private/local-only)**; the S3 API (`:9000`) is
 internal to the compose network only. The catalog stays local SQLite on the shared volume in all
 backends (single-writer; keep one `stream` replica and schedule `maintain` not to overlap it).
+
+### MinIO object-data location (`RTDP_MINIO_DATA_PATH`)
+
+`RTDP_MINIO_DATA_PATH` is a **Compose/deployment-only** variable — **not** an `rtdp` application
+`Settings` field / `RTDP_*` app setting. It selects the source of MinIO's `/data` mount:
+
+- **Unset or empty** → the Docker **named volume `minio-data`** (the local/CI default). The Compose
+  expression `${RTDP_MINIO_DATA_PATH:-minio-data}` falls back to `minio-data` when the variable is
+  unset **or** empty.
+- **An absolute host path** (production) → a **bind mount** onto that path, e.g. a dedicated block
+  volume. The host filesystem must already be **mounted persistently**, and the destination directory
+  must **exist with permissions the MinIO container can write**, before deploy.
+
+**Render and inspect the effective mount before deploying** — check the `minio` service's `volumes:`
+in the rendered model for both modes:
+
+```
+# Default — expect  source: minio-data   type: volume
+docker compose -f deploy/docker-compose.yml --profile s3 config
+
+# Absolute path — expect  source: /mnt/minio-data/minio   type: bind
+RTDP_MINIO_DATA_PATH=/mnt/minio-data/minio \
+  docker compose -f deploy/docker-compose.yml --profile s3 config
+```
+
+`/mnt/minio-data/minio` is a **generic example**; use your host's real block-volume path only in the
+host's secret store (Doppler), never in the repo. When you switch to a bind mount, the old
+`minio-data` named volume is left in place as **rollback protection — do not delete it during a
+migration** (reclaiming its space is a separate, later step). Object-store capacity is **not** a
+substitute for retention, snapshot expiration, orphan-file cleanup, compaction, monitoring, or
+backups — those remain **follow-up** work, out of scope here.
+
+### Ingestion writer (opt-in via the `ingestion` profile)
+
+The `stream` micro-batch writer is gated behind the **`ingestion`** Compose profile — a service with
+no profile is always started, so `stream` (like `maintain`) now starts **only** when its profile is
+active:
+
+- A **bare** `docker compose up -d` (and `make compose-up`) starts only `api`. The host deploy runs
+  `COMPOSE_PROFILES=s3,edge,observability`, which **does not include `ingestion`, so the deploy will
+  not select `stream`** — it stays stopped until you add `ingestion`.
+- **Caveat:** explicitly targeting the service (`docker compose … up -d stream`) or adding `ingestion`
+  to `COMPOSE_PROFILES` **can still start it** — the profile prevents *accidental* startup, not
+  deliberate startup.
+- To run the writer locally or resume ingestion on the host, add the profile:
+  `docker compose -f deploy/docker-compose.yml --profile ingestion up -d` (or set
+  `COMPOSE_PROFILES=…,ingestion`).
 
 ## Edge / TLS (profile `edge`)
 
@@ -135,8 +190,8 @@ Image validation is kept separate from publishing, and publishing separate from 
 - **`deploy`** (push to `main` only; needs lint/unit + LocalStack + smoke + `publish-image`;
   `environment: production`) — a **real, gated SSH deploy**. Raw OpenSSH (no third-party action):
   writes `DEPLOY_SSH_KEY` to a 0600 temp file, pins the host key with `ssh-keyscan`, and runs exactly
-  one remote command — `bash "$DEPLOY_SSH_PATH/deploy/host_deploy.sh"` (compose pull + up + `/health`
-  check). It passes the approved commit as `RTDP_DEPLOY_EXPECTED_SHA=$GITHUB_SHA`, so the host aborts
+  one remote command — `bash "$DEPLOY_SSH_PATH/deploy/host_deploy.sh"` (compose pull + up + `/livez`
+  liveness check). It passes the approved commit as `RTDP_DEPLOY_EXPECTED_SHA=$GITHUB_SHA`, so the host aborts
   before compose if its checkout is stale (see "Checkout alignment" below). No secrets are printed; it
   runs only after a human approves the `production` environment.
 
@@ -156,8 +211,8 @@ Image validation is kept separate from publishing, and publishing separate from 
 The deploy job is wired but **gated**: on a push to `main` it queues against the `production`
 environment and does nothing until a required reviewer approves it in the GitHub UI
 (**Actions → the run → Review deployments → Approve**). On approval it SSHes to the host and runs
-`host_deploy.sh`; the job **fails if the post-deploy `/health` check fails**. Nothing deploys from a
-PR or a feature branch, and CI provisions no infrastructure.
+`host_deploy.sh`; the job **fails if the post-deploy `/livez` liveness check fails**. Nothing deploys
+from a PR or a feature branch, and CI provisions no infrastructure.
 
 ### Checkout alignment (host must match the approved commit)
 `host_deploy.sh` deploys the compose file and mounted config (`docker-compose.yml`,

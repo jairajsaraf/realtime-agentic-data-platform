@@ -36,7 +36,9 @@ localstack-down:
 docker-build:
 	docker build -t rtdp:local .
 
-# Deployed-host topology (read API + stream loop on file://). Add --build to rebuild.
+# Compose topology (read API only on file:// by default). The stream writer is opt-in via
+# the `ingestion` profile; invoke Docker Compose with `--profile ingestion` to include it.
+# Add `--build` to rebuild.
 compose-up:
 	docker compose -f deploy/docker-compose.yml up -d
 

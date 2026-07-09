@@ -2,17 +2,17 @@
 #
 # Stage E6 — host-side deploy action (the sole remote command run by the gated CI/CD deploy job).
 #
-# Pulls the published image and (re)starts the single-host compose stack, then verifies /health.
+# Pulls the published image and (re)starts the single-host compose stack, then verifies liveness.
 # Run ON the prepared host, from a checkout/copy of this repo at the deploy path. The CI deploy job
 # invokes exactly: `bash "$DEPLOY_SSH_PATH/deploy/host_deploy.sh"`. This script does NOT fetch code
 # (no git pull) — the deploy path is prepared/updated out-of-band — and prints no secrets.
 #
 # Runtime secrets (RTDP_*) are injected by Doppler when available (`doppler run -- docker compose`).
-# /health depends only on the API: never on Doppler, Datadog, NVIDIA, or the internet.
+# The liveness probe depends only on the API: never on Doppler, Datadog, NVIDIA, or the internet.
 #
 # Env (all optional):
 #   COMPOSE_PROFILES        compose profiles to bring up   (default: s3,edge,observability)
-#   DEPLOY_HEALTH_URL       URL to poll for readiness       (default: http://127.0.0.1:8000/health)
+#   DEPLOY_HEALTH_URL       URL to poll for liveness        (default: http://127.0.0.1:8000/livez)
 #   DEPLOY_HEALTH_RETRIES   health-check attempts           (default: 60)
 #   DEPLOY_HEALTH_INTERVAL  seconds between attempts        (default: 2)
 #   RTDP_DEPLOY_NO_DOPPLER  set to 1 to skip the doppler wrapper even if doppler is installed
@@ -107,23 +107,27 @@ log "Pulling images..."
 log "Starting/updating the stack..."
 "${runner[@]}" "${compose[@]}" up -d
 
-# --- post-deploy health check (plain HTTP against the local API; no external dependency) ---
-health_url="${DEPLOY_HEALTH_URL:-http://127.0.0.1:8000/health}"
+# --- post-deploy liveness check (plain HTTP against the local API; no external dependency) ---
+# Probes /livez (liveness): 200 whenever the API process serves, independent of whether a table
+# exists yet — so a fresh host (or recreated rtdp-state) deploys without starting ingestion. Data
+# readiness stays on /health (Datadog's http_check). DEPLOY_HEALTH_URL keeps its name; only the
+# default value changed.
+health_url="${DEPLOY_HEALTH_URL:-http://127.0.0.1:8000/livez}"
 retries="${DEPLOY_HEALTH_RETRIES:-60}"
 interval="${DEPLOY_HEALTH_INTERVAL:-2}"
-log "Health check: ${health_url} (up to ${retries} attempts, ${interval}s apart)"
+log "Liveness check: ${health_url} (up to ${retries} attempts, ${interval}s apart)"
 
 attempt=1
 while [ "${attempt}" -le "${retries}" ]; do
   if curl -fs -o /dev/null "${health_url}"; then
-    log "OK: /health passed on attempt ${attempt}."
+    log "OK: liveness passed on attempt ${attempt}."
     exit 0
   fi
   sleep "${interval}"
   attempt=$((attempt + 1))
 done
 
-echo "ERROR: /health did not pass after ${retries} attempts: ${health_url}" >&2
+echo "ERROR: liveness did not pass after ${retries} attempts: ${health_url}" >&2
 # Surface recent API logs to aid diagnosis (no secrets are logged by the app at INFO).
 "${compose[@]}" logs --tail 50 api >&2 || true
 exit 1

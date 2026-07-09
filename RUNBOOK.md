@@ -289,15 +289,23 @@ as a command: `serve` (read API), `stream` (micro-batch writer), `maintain expir
 ### 2. Single-host Docker Compose topology
 
 ```powershell
-docker compose -f deploy/docker-compose.yml up -d --build           # file:// (default; no secrets)
-docker compose -f deploy/docker-compose.yml --profile s3 up -d      # self-hosted MinIO (aws backend)
+docker compose -f deploy/docker-compose.yml up -d --build                     # api only (file://; no writer, no secrets)
+docker compose -f deploy/docker-compose.yml --profile ingestion up -d --build # add the stream writer
+docker compose -f deploy/docker-compose.yml --profile s3 up -d                # self-hosted MinIO (aws backend)
 ```
-`api` + `stream` share one volume; the API is at http://localhost:8000 (`/health` returns 503 until
-the first stream batch creates the table, then 200). For the MinIO path, set
+The `stream` writer is **opt-in behind the `ingestion` profile**, so a bare `up -d` (and `make
+compose-up`) starts only `api`; `/health` stays 503 until data exists — bring up `ingestion`, or seed
+once with `docker compose -f deploy/docker-compose.yml run --rm api ingest --rows 50`, then it returns
+200. The container healthcheck and the deploy gate probe **`/livez`** (liveness — 200 whenever the API
+process serves, no data needed), so a fresh host becomes healthy and deploys without starting the
+writer; `/health` remains the readiness check that Datadog polls. `api` + `stream` share one volume;
+the API is at http://localhost:8000. For the MinIO path, set
 `RTDP_STORAGE_BACKEND=aws` and point `RTDP_S3_ENDPOINT_URL` at the MinIO service (real AWS stays the
-default when no endpoint is set). The catalog is **local SQLite on the shared volume** in every
-backend -> single-writer: keep one `stream` and schedule `maintain` not to overlap it. One-shot
-maintenance: `docker compose -f deploy/docker-compose.yml run --rm maintain`. See `deploy/README.md`.
+default when no endpoint is set); MinIO's object-data source is selected by `RTDP_MINIO_DATA_PATH`
+(Compose-only: unset → named volume `minio-data`; an absolute host path → a bind mount — see
+`deploy/README.md`). The catalog is **local SQLite on the shared volume** in every backend ->
+single-writer: keep one `stream` and schedule `maintain` not to overlap it. One-shot maintenance:
+`docker compose -f deploy/docker-compose.yml run --rm maintain`. See `deploy/README.md`.
 
 ### 3. Telemetry boundary (no-op unless enabled AND installed)
 
@@ -387,7 +395,12 @@ its operations; teardown and cost control are at the end.
    resolve. (If the domain can't be claimed, **stop and ask** before any fallback.)
 4. **Doppler:** create a project + config; add `RTDP_*` (storage/MinIO/AWS, OTel endpoint),
    `DD_API_KEY`, `DD_SITE`, `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`, `RTDP_PUBLIC_HOSTNAME`,
-   `RTDP_API_BIND=127.0.0.1`, `COMPOSE_PROFILES=s3,edge,observability`. Create a
+   `RTDP_API_BIND=127.0.0.1`, `COMPOSE_PROFILES=s3,edge,observability`. That profile set **omits
+   `ingestion`**, so the bare `docker compose up -d` the deploy runs starts only `api` (+ s3/edge/
+   observability) and **does not select the `stream` writer** — add `ingestion` only when you
+   deliberately want ingestion to run (explicitly targeting `stream` can still start it). To relocate
+   MinIO's object data onto a bind-mounted block volume, also add the Compose-only
+   `RTDP_MINIO_DATA_PATH=<absolute host path>` (unset keeps the `minio-data` named volume). Create a
    **service token** for the host. **Do NOT add `RTDP_IMAGE` to Doppler** — it is
    deployment-controlled: the gated deploy passes the approved commit's SHA-pinned ref and
    `host_deploy.sh` runs `doppler run --preserve-env=RTDP_IMAGE`, so a Doppler secret can't override
@@ -440,12 +453,18 @@ Datadog**, and there is no `/metrics` endpoint.
 docker compose -f deploy/docker-compose.yml config                       # default renders, key-free
 docker compose -f deploy/docker-compose.yml `
   --profile s3 --profile edge --profile observability config             # all profiles render
+# MinIO object-data source toggle (Compose-only): unset -> named volume; absolute path -> bind mount
+docker compose -f deploy/docker-compose.yml --profile s3 config          # default: source: minio-data (type: volume)
+$env:RTDP_MINIO_DATA_PATH="/mnt/minio-data/minio"                        # generic example path (not the real host path)
+docker compose -f deploy/docker-compose.yml --profile s3 config          # override: source: /mnt/minio-data/minio (type: bind)
+Remove-Item Env:\RTDP_MINIO_DATA_PATH
 bash -n deploy/bootstrap_host.sh deploy/host_deploy.sh                   # shell syntax (also run in CI)
 RTDP_DEPLOY_EXPECTED_SHA=deadbeef bash deploy/host_deploy.sh             # checkout guard: ERRORs + exits 1 (pre-docker)
-# Optional bring-up (file:// synthetic + Caddy):
-docker compose -f deploy/docker-compose.yml --profile edge up -d
+# Optional bring-up (file:// synthetic + Caddy). Add `ingestion` so the writer seeds a table and
+# /health reaches 200 — a bare bring-up starts only api and stays 503 until data exists:
+docker compose -f deploy/docker-compose.yml --profile edge --profile ingestion up -d
 curl -k https://localhost/health        # Caddy internal CA (or: curl http://localhost:8000/health)
-docker compose -f deploy/docker-compose.yml --profile edge down
+docker compose -f deploy/docker-compose.yml --profile edge --profile ingestion down
 ```
 Caddy local TLS uses an internal CA, so `-k` is expected. The Datadog Agent needs a real `DD_API_KEY`,
 so leave the `observability` profile **out** of local bring-up (or expect the Agent to error) — that is

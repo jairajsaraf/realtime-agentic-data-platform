@@ -146,6 +146,53 @@ jobs:
           MINIO_ROOT_USER: ci
           MINIO_ROOT_PASSWORD: ci-placeholder
         run: docker compose -f deploy/docker-compose.yml config --quiet
+      # Assert the RTDP_MINIO_DATA_PATH toggle and the stream `ingestion` gate render as intended.
+      # Fail-closed and stdlib-only: renders are parsed with json + direct indexing, so a bad render,
+      # malformed JSON, or a missing field raises (nonzero exit) instead of being silently skipped.
+      - name: Assert MinIO source + stream profile render (fail-closed, stdlib only)
+        env:
+          MINIO_ROOT_USER: ci
+          MINIO_ROOT_PASSWORD: ci-placeholder
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+
+          def render(extra_env, *profile_args):
+              env = {**os.environ, **extra_env}
+              proc = subprocess.run(
+                  ["docker", "compose", "-f", "deploy/docker-compose.yml",
+                   *profile_args, "config", "--format", "json"],
+                  check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                  text=True, env=env,
+              )
+              return json.loads(proc.stdout)  # malformed JSON -> JSONDecodeError -> nonzero exit
+
+          def mount_at(model, service, target):
+              mounts = model["services"][service]["volumes"]  # missing key -> KeyError -> nonzero exit
+              matches = [m for m in mounts if m["target"] == target]
+              if len(matches) != 1:
+                  raise SystemExit(f"{service}: expected one mount at {target!r}, got {mounts!r}")
+              return matches[0]
+
+          # 1) Default: an empty RTDP_MINIO_DATA_PATH must fall back (`:-`) to the named volume.
+          m = mount_at(render({"RTDP_MINIO_DATA_PATH": ""}, "--profile", "s3"), "minio", "/data")
+          assert m["type"] == "volume", f"default mount type: {m['type']!r}"
+          assert m["source"] == "minio-data", f"default mount source: {m['source']!r}"
+          assert m["target"] == "/data", f"default mount target: {m['target']!r}"
+          print("OK default: minio /data -> named volume minio-data")
+
+          # 2) Override: an absolute host path must render as a bind mount.
+          m = mount_at(render({"RTDP_MINIO_DATA_PATH": "/mnt/test-minio/data"}, "--profile", "s3"), "minio", "/data")
+          assert m["type"] == "bind", f"override mount type: {m['type']!r}"
+          assert m["source"] == "/mnt/test-minio/data", f"override mount source: {m['source']!r}"
+          assert m["target"] == "/data", f"override mount target: {m['target']!r}"
+          print("OK override: minio /data -> bind /mnt/test-minio/data")
+
+          # 3) The stream writer must be gated behind the `ingestion` profile (not the default set).
+          profiles = render({}, "--profile", "ingestion")["services"]["stream"]["profiles"]
+          assert profiles == ["ingestion"], f"stream.profiles: {profiles!r}"
+          print("OK stream: profiles == ['ingestion']")
+          PY
 
   # Publish the image to GHCR on main only, using the built-in GITHUB_TOKEN (no external secret).
   publish-image:

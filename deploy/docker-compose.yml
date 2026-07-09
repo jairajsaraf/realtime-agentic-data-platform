@@ -1,8 +1,15 @@
 # Stage E — single-host deployed topology (one image, multiple entrypoints).
 #
 # Run from the repo root:
-#   docker compose -f deploy/docker-compose.yml up -d --build           # file:// (default)
-#   docker compose -f deploy/docker-compose.yml --profile s3 up -d      # MinIO / aws backend
+#   docker compose -f deploy/docker-compose.yml up -d --build              # file:// (default)
+#   docker compose -f deploy/docker-compose.yml --profile s3 up -d         # MinIO / aws backend
+#   docker compose -f deploy/docker-compose.yml --profile ingestion up -d  # add the stream writer
+#
+# The `stream` writer is opt-in behind the `ingestion` profile — a bare `up -d` starts only `api`,
+# so the host's COMPOSE_PROFILES=s3,edge,observability set does not select the writer (explicitly
+# targeting `stream` can still start it). MinIO's object-data source is set by RTDP_MINIO_DATA_PATH
+# (Compose/deploy-only, NOT an app setting): unset -> the `minio-data` named volume; an absolute host
+# path -> a bind mount. See deploy/README.md.
 #
 # Backend selection is env-driven so the same app services run on the file:// backend (the
 # default, runnable with no secrets) or on an S3-compatible store. For the MinIO path, set
@@ -71,6 +78,10 @@ services:
       start_period: 30s
 
   # The sole writer: appends one micro-batch snapshot per interval (synthetic source).
+  # Opt-in behind the `ingestion` profile: a service with no profile is always started, so the writer
+  # starts only when `ingestion` is active. The host runs COMPOSE_PROFILES=s3,edge,observability (no
+  # `ingestion`), so a bare `up -d` does not select the writer; locally add `--profile ingestion` (or
+  # COMPOSE_PROFILES=ingestion) to run it.
   stream:
     <<: *rtdp-image
     command: ["stream", "--source", "synthetic"]
@@ -83,6 +94,7 @@ services:
     stop_signal: SIGINT          # the stream loop traps SIGINT only (plan Risk R3)
     depends_on:
       - api
+    profiles: ["ingestion"]
 
   # One-shot snapshot maintenance (metadata-only). Run on demand or from a host timer:
   #   docker compose -f deploy/docker-compose.yml run --rm maintain
@@ -167,7 +179,12 @@ services:
     ports:
       - "127.0.0.1:9001:9001"          # console bound to localhost only — private/local-only
     volumes:
-      - minio-data:/data
+      # MinIO object-data source is Compose/deploy-configurable (NOT an app setting). Unset/empty ->
+      # the named volume `minio-data` (local/CI/rollback default). Set RTDP_MINIO_DATA_PATH to an
+      # ABSOLUTE host path to switch to a bind mount (a persistent block volume); that host path must
+      # be mounted persistently with a pre-created, MinIO-writable directory. Render & inspect before
+      # deploy: `docker compose -f deploy/docker-compose.yml config`.
+      - "${RTDP_MINIO_DATA_PATH:-minio-data}:/data"
     profiles: ["s3"]
     restart: unless-stopped
 

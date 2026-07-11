@@ -118,7 +118,9 @@ services:
   # provisions a real Let's Encrypt certificate automatically. Profile-gated, so the default local
   # path (file:// / MinIO) is unchanged and `docker compose config` stays key-free.
   caddy:
-    image: caddy:2
+    # Default tag keeps normal mode unchanged. In the deterministic `local-pinned` deploy mode this is
+    # overridden with an exact digest ref (RTDP_CADDY_IMAGE=caddy@sha256:...); no digest is hardcoded here.
+    image: ${RTDP_CADDY_IMAGE:-caddy:2}
     ports:
       - "80:80"
       - "443:443"
@@ -142,8 +144,9 @@ services:
   # `/metrics` scrape endpoint is added.
   datadog-agent:
     # Pinned to the exact version verified live in E6.3 (hostname fix, OTLP ingest, traces
-    # end-to-end confirmed) instead of the moving `:7` tag.
-    image: gcr.io/datadoghq/agent:7.80.3
+    # end-to-end confirmed) instead of the moving `:7` tag. Default tag keeps normal mode unchanged;
+    # `local-pinned` overrides it with an exact digest ref (RTDP_DATADOG_IMAGE=...@sha256:...).
+    image: ${RTDP_DATADOG_IMAGE:-gcr.io/datadoghq/agent:7.80.3}
     environment:
       DD_API_KEY: ${DD_API_KEY:-}
       DD_SITE: ${DD_SITE:-datadoghq.com}
@@ -167,7 +170,9 @@ services:
 
   # --- object storage (profile "s3"): self-hosted MinIO via the rtdp `aws` backend ---
   minio:
-    image: minio/minio:latest
+    # Default tag keeps normal mode unchanged; `local-pinned` overrides it with an exact digest ref
+    # (RTDP_MINIO_IMAGE=minio/minio@sha256:...). No digest is hardcoded here.
+    image: ${RTDP_MINIO_IMAGE:-minio/minio:latest}
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       # No secrets committed. Empty defaults (`:-`) keep the no-secrets file:// path runnable —
@@ -193,7 +198,9 @@ services:
   # One-shot: create the warehouse bucket in MinIO (idempotent). The `aws` backend does not
   # auto-create buckets, so this replaces the LocalStack-only ensure_bucket for the MinIO path.
   minio-init:
-    image: minio/mc:latest
+    # Default tag keeps normal mode unchanged; `local-pinned` overrides it with an exact digest ref
+    # (RTDP_MINIO_MC_IMAGE=minio/mc@sha256:...). No digest is hardcoded here.
+    image: ${RTDP_MINIO_MC_IMAGE:-minio/mc:latest}
     depends_on:
       - minio
     environment:

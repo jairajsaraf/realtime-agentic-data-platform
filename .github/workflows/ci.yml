@@ -133,7 +133,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Shell syntax check (deploy scripts)
-        run: bash -n deploy/host_deploy.sh deploy/bootstrap_host.sh
+        run: bash -n deploy/host_deploy.sh deploy/bootstrap_host.sh deploy/tests/test_deploy_modes.sh
+      - name: Deploy-mode logic tests (mocked docker + doppler; no network/Docker)
+        run: bash deploy/tests/test_deploy_modes.sh
       - name: Build image
         run: docker build -t rtdp:ci .
       - name: Container /health smoke (file:// synthetic)
@@ -263,6 +265,17 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_SSH_PATH: ${{ secrets.DEPLOY_SSH_PATH }}
           DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+          # Deterministic digest-pinned deploy plumbing (Session-1 P0). All NON-SECRET, environment-level
+          # `production` variables, unset by default → normal mode (registry pull; behavior unchanged).
+          # RUNTIME_IMAGE_DIGEST overrides the runtime app image with a digest ref (runtime identity,
+          # separate from the deployment/checkout identity $GITHUB_SHA); the four third-party digests pin
+          # minio/mc/caddy/datadog. local-pinned requires all five to be exact digest refs.
+          DEPLOY_MODE: ${{ vars.RTDP_DEPLOY_MODE }}
+          RUNTIME_IMAGE_DIGEST: ${{ vars.RTDP_RUNTIME_IMAGE_DIGEST }}
+          MINIO_IMG: ${{ vars.RTDP_MINIO_IMAGE }}
+          MC_IMG: ${{ vars.RTDP_MINIO_MC_IMAGE }}
+          CADDY_IMG: ${{ vars.RTDP_CADDY_IMAGE }}
+          DD_IMG: ${{ vars.RTDP_DATADOG_IMAGE }}
         run: |
           set -euo pipefail
           umask 077
@@ -281,24 +294,33 @@ jobs:
             echo "WARNING: DEPLOY_SSH_KNOWN_HOSTS is unset; falling back to in-band ssh-keyscan (TOFU). Pin it in E6.2." >&2
             ssh-keyscan -H "$DEPLOY_SSH_HOST" > "$known_hosts"
           fi
-          # Deploy the APPROVED commit's immutable image (publish-image pushed :$GITHUB_SHA); never
-          # rely on :latest, which a queued/approved run could resolve to a newer commit.
-          image_ref="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]'):${GITHUB_SHA}"
-          # Pass the deploy path + image ref as POSITIONAL parameters ($1/$2) to a fixed remote script
-          # read from stdin (bash -s) — they are consumed as "$1"/"$2", never interpolated into a
-          # command, so a path containing quotes/backticks/$() is a literal value, not evaluated.
-          # printf %q only escapes them for safe transport through ssh's single-string re-parse. No eval.
+          # Runtime application image (RUNTIME identity — separate from the deployment/checkout identity
+          # $GITHUB_SHA). When RUNTIME_IMAGE_DIGEST is set (local-pinned), deploy that exact digest ref;
+          # otherwise deploy the APPROVED commit's immutable image (publish-image pushed :$GITHUB_SHA) —
+          # never :latest, which a queued/approved run could resolve to a newer commit.
+          image_ref="${RUNTIME_IMAGE_DIGEST:-ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]'):${GITHUB_SHA}}"
+          # Pass the deploy path, image ref, approved SHA, deploy mode, and the four third-party image
+          # refs as POSITIONAL parameters ($1..$8) to a fixed remote script read from stdin (bash -s) —
+          # they are consumed as "$1".."$8", never interpolated into a command, so a value containing
+          # quotes/backticks/$() is literal, not evaluated. printf %q only escapes them for safe transport
+          # through ssh's single-string re-parse. No eval. Empty vars (normal mode) transport as '' and
+          # are ignored downstream. The mode + image refs are NON-SECRET (environment-level vars).
           ssh -i "$key_file" \
             -o IdentitiesOnly=yes \
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$known_hosts" \
             "$DEPLOY_SSH_USER@$DEPLOY_SSH_HOST" \
-            "bash -s -- $(printf '%q' "$DEPLOY_SSH_PATH") $(printf '%q' "$image_ref") $(printf '%q' "$GITHUB_SHA")" <<'REMOTE'
+            "bash -s -- $(printf '%q' "$DEPLOY_SSH_PATH") $(printf '%q' "$image_ref") $(printf '%q' "$GITHUB_SHA") $(printf '%q' "${DEPLOY_MODE:-normal}") $(printf '%q' "$MINIO_IMG") $(printf '%q' "$MC_IMG") $(printf '%q' "$CADDY_IMG") $(printf '%q' "$DD_IMG")" <<'REMOTE'
           set -euo pipefail
           deploy_path="$1"
           image_ref="$2"
           expected_sha="$3"
+          deploy_mode="$4"
+          minio_img="$5"
+          mc_img="$6"
+          caddy_img="$7"
+          dd_img="$8"
           cd "$deploy_path"
           # Authoritative checkout-alignment guard — runs from the approved stdin wrapper, so it is
           # enforced even if the host's own deploy/host_deploy.sh is stale (Codex PR #10 P1). Verify-only:
@@ -324,5 +346,12 @@ jobs:
             echo "ERROR: host checkout has uncommitted or untracked changes; refusing to deploy." >&2
             exit 1
           fi
-          RTDP_IMAGE="$image_ref" RTDP_DEPLOY_EXPECTED_SHA="$expected_sha" bash deploy/host_deploy.sh
+          # Pass the runtime image (RTDP_IMAGE) + checkout-alignment SHA + the Session-1 P0 deploy-mode
+          # controls to the reviewed host script. All non-secret; empty (normal-mode default) values are
+          # ignored by host_deploy.sh and Compose falls back to the existing tag defaults.
+          RTDP_IMAGE="$image_ref" RTDP_DEPLOY_EXPECTED_SHA="$expected_sha" \
+            RTDP_DEPLOY_MODE="$deploy_mode" \
+            RTDP_MINIO_IMAGE="$minio_img" RTDP_MINIO_MC_IMAGE="$mc_img" \
+            RTDP_CADDY_IMAGE="$caddy_img" RTDP_DATADOG_IMAGE="$dd_img" \
+            bash deploy/host_deploy.sh
           REMOTE

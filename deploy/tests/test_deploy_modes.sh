@@ -8,6 +8,9 @@
 #   * local-pinned is deterministic DIGEST-ONLY, NO pull, NO build (`up -d --pull never --no-build`);
 #   * local-pinned FAILS CLOSED on a tag ref, a malformed digest, an empty image var, an active image
 #     absent locally, an active image that is a tag, and an unexpected active service (incl. `stream`);
+#   * local-pinned FAILS CLOSED (before any image inspection or `up`) when a Compose `stream`
+#     (ingestion writer) container is currently RUNNING — queried read-only by the canonical service
+#     label; an EXITED `stream` does not block; normal mode never runs this query;
 #   * all five digest refs reach Compose unchanged;
 #   * an unknown RTDP_DEPLOY_MODE is rejected.
 #
@@ -48,6 +51,26 @@ if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
     if [ "${img}" = "${bad}" ]; then exit 1; fi
   done
   printf 'sha256:localid\n'
+  exit 0
+fi
+
+# `docker ps --filter status=running --filter label=com.docker.compose.service=stream --format ...`
+# Command fidelity: only emit the mocked running-stream rows when BOTH required filters are present
+# (status=running AND the canonical stream service label) — an arbitrary `docker ps` returns nothing.
+if [ "${1:-}" = "ps" ]; then
+  has_running=0; has_stream_label=0
+  for a in "$@"; do
+    case "$a" in
+      status=running)                            has_running=1 ;;
+      label=com.docker.compose.service=stream)   has_stream_label=1 ;;
+    esac
+  done
+  if [ "${has_running}" = "1" ] && [ "${has_stream_label}" = "1" ]; then
+    printf 'ps status=running label=stream\n' >> "${DOCKER_ACTIONS_LOG}"
+    if [ -n "${MOCK_PS_STREAM:-}" ]; then printf '%s\n' "${MOCK_PS_STREAM}"; fi
+  else
+    printf 'ps other\n' >> "${DOCKER_ACTIONS_LOG}"
+  fi
   exit 0
 fi
 
@@ -331,6 +354,67 @@ if run_deploy "${pinned_vars[@]}" MOCK_CONFIG_SERVICES="${all_services}" \
       MOCK_CONFIG_IMAGES=""; then
   bad "accepted an empty image result (should fail)"
 else ok "rejects an empty image result"; fi
+
+echo "--- Codex P2: running ingestion-writer (stream) runtime guard ---"
+
+# 22) a RUNNING Compose `stream` container blocks local-pinned. The read-only guard fires BEFORE image
+#     inspection and before `up`, identifies the running container (id + name), and never pulls/builds.
+if run_deploy "${pinned_vars[@]}" MOCK_CONFIG_SERVICES="${all_services}" MOCK_CONFIG_IMAGES="${all_images}" \
+      MOCK_PS_STREAM=$'container-id-1\tdeploy\tdeploy-stream-1'; then
+  bad "local-pinned deployed while a 'stream' container was running (should fail)"
+else
+  err=""
+  grep -q 'currently RUNNING' "${work}/out.log"  || err="${err} no running-writer error;"
+  grep -q 'container-id-1'     "${work}/out.log"  || err="${err} container id not reported;"
+  grep -q 'deploy-stream-1'    "${work}/out.log"  || err="${err} container name not reported;"
+  has_action 'ps status=running label=stream'     || err="${err} runtime query lacked required filters;"
+  ! grep -q '^inspect ' "${DOCKER_ACTIONS_LOG}"    || err="${err} image inspect ran after detection;"
+  ! grep -q '^up '      "${DOCKER_ACTIONS_LOG}"    || err="${err} compose up ran after detection;"
+  ! has_action 'pull'                             || err="${err} pull ran after detection;"
+  ! has_action 'build'                            || err="${err} build ran after detection;"
+  if [ -z "${err}" ]; then ok "local-pinned rejects a RUNNING stream writer before inspection/up (no pull/build)"
+  else bad "running-stream guard:${err}"; fi
+fi
+
+# 23) two RUNNING stream containers block, and the complete captured set is reported before failing.
+if run_deploy "${pinned_vars[@]}" MOCK_CONFIG_SERVICES="${all_services}" MOCK_CONFIG_IMAGES="${all_images}" \
+      MOCK_PS_STREAM=$'container-id-1\tdeploy\tdeploy-stream-1\ncontainer-id-2\tdeploy\tdeploy-stream-2'; then
+  bad "local-pinned deployed while two 'stream' containers were running (should fail)"
+else
+  err=""
+  grep -q 'deploy-stream-1' "${work}/out.log"  || err="${err} first container not reported;"
+  grep -q 'deploy-stream-2' "${work}/out.log"  || err="${err} second container not reported;"
+  ! grep -q '^up ' "${DOCKER_ACTIONS_LOG}"      || err="${err} compose up ran after detection;"
+  if [ -z "${err}" ]; then ok "local-pinned reports and rejects multiple RUNNING stream writers"
+  else bad "multiple-stream guard:${err}"; fi
+fi
+
+# 24) an EXITED stream is permitted: the running-only query returns nothing (MOCK_PS_STREAM empty), so
+#     local-pinned proceeds to `up --pull never --no-build`. Also asserts the runtime query actually
+#     carried BOTH required filters (fidelity) — not that any arbitrary `docker ps` returns the mock.
+if run_deploy "${pinned_vars[@]}" MOCK_CONFIG_SERVICES="${all_services}" MOCK_CONFIG_IMAGES="${all_images}" \
+      MOCK_PS_STREAM=""; then
+  err=""
+  has_action 'ps status=running label=stream' || err="${err} runtime query lacked required filters;"
+  has_action 'up pullnever=1 nobuild=1'        || err="${err} did not reach up --pull never --no-build;"
+  if [ -z "${err}" ]; then ok "local-pinned permits an EXITED stream (empty running query) and proceeds to up"
+  else bad "exited-stream happy path:${err}"; fi
+else
+  bad "local-pinned failed with no running stream (should proceed); out: $(cat "${work}/out.log")"
+fi
+
+# 25) normal mode is unchanged: it never runs the runtime stream query, even with a stream "running",
+#     and still pulls then `up -d`.
+if run_deploy RTDP_DEPLOY_MODE=normal MOCK_PS_STREAM=$'container-id-9\tdeploy\tdeploy-stream-9'; then
+  err=""
+  has_action 'pull'                     || err="${err} normal mode did not pull;"
+  has_action 'up pullnever=0 nobuild=0' || err="${err} normal mode did not 'up -d';"
+  ! grep -q '^ps ' "${DOCKER_ACTIONS_LOG}" || err="${err} normal mode ran the runtime stream query;"
+  if [ -z "${err}" ]; then ok "normal mode skips the runtime stream query and still pulls + 'up -d'"
+  else bad "normal-mode stream-guard isolation:${err}"; fi
+else
+  bad "normal mode exited nonzero with MOCK_PS_STREAM set ($?)"
+fi
 
 echo "=== ${pass} passed, ${fail} failed ==="
 [ "${fail}" -eq 0 ]

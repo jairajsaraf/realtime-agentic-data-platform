@@ -21,7 +21,10 @@
 #                             local-pinned  deterministic, DIGEST-ONLY, NO pull, NO build. Every one of
 #                                           the five image refs below (and every effective active image)
 #                                           must be a digest ref repo@sha256:<64hex> already present
-#                                           locally, else it fails closed before touching the stack.
+#                                           locally, else it fails closed before touching the stack. It
+#                                           also fails closed if a Compose `stream` (ingestion writer)
+#                                           container is currently RUNNING (read-only check; never
+#                                           stopped/removed).
 #                           Any other value is rejected.
 #   RTDP_IMAGE / RTDP_MINIO_IMAGE / RTDP_MINIO_MC_IMAGE / RTDP_CADDY_IMAGE / RTDP_DATADOG_IMAGE
 #                           the five service image refs (NON-SECRET). Tags in normal mode; exact digest
@@ -174,11 +177,34 @@ case "${deploy_mode}" in
       fail=1
     fi
 
-    # 3) The effective active IMAGE multiset must (a) equal EXACTLY the five supplied digest refs
-    #    (sorted, duplicates preserved — no `sort -u`, so a duplicate-image render is caught), and
-    #    (b) every active image must be a strict digest ref AND present locally (no pull). Capture
-    #    first so a failed render or an empty active set fails closed (an empty set would otherwise
-    #    skip the loop and pass silently).
+    # 3) Runtime writer guard (fail closed BEFORE any image inspection or `up`). Step 2 only proves the
+    #    active Compose CONFIG excludes `stream`; it cannot see a `stream` container that was started
+    #    earlier (explicitly, or via the `ingestion` profile) and is STILL RUNNING — `up` for the
+    #    selected profiles does not touch such an out-of-profile container (no --remove-orphans). Query
+    #    the Docker Engine directly by the canonical Compose service label, independent of the current
+    #    profile selection and of `docker compose config`/`ps`. READ-ONLY: it never stops, removes, or
+    #    modifies the container; it only refuses to deploy and tells the operator to stop ingestion
+    #    first. status=running means an exited `stream` does NOT block. The host is dedicated to this
+    #    project, so any RUNNING Compose `stream` service is an unsafe concurrent writer.
+    if ! running_stream="$(docker ps --filter status=running \
+        --filter label=com.docker.compose.service=stream \
+        --format '{{.ID}}\t{{.Label "com.docker.compose.project"}}\t{{.Names}}')"; then
+      echo "ERROR: failed to query the Docker Engine for running 'stream' containers; refusing to deploy." >&2
+      exit 1
+    fi
+    if [ -n "${running_stream//[[:space:]]/}" ]; then
+      echo "ERROR: a Compose 'stream' (ingestion writer) container is currently RUNNING; refusing local-pinned deploy." >&2
+      echo "       Running stream container(s) [id<TAB>project<TAB>name]:" >&2
+      printf '%s\n' "${running_stream}" | sed 's/^/         /' >&2
+      echo "       Stop ingestion separately before deploying; this guard will not stop it automatically." >&2
+      exit 1
+    fi
+    log "Runtime writer guard OK: no running Compose 'stream' container."
+
+    # 4) The effective active IMAGE multiset must equal EXACTLY the five supplied digest refs (sorted,
+    #    duplicates preserved — no `sort -u`, so a duplicate-image render is caught). Capture first so a
+    #    failed render or an empty active set fails closed (an empty set would otherwise skip the
+    #    per-image loop below and pass silently).
     if ! active_images="$("${runner[@]}" "${img_env[@]}" "${compose[@]}" config --images)"; then
       echo "ERROR: 'docker compose config --images' failed while resolving the active image set." >&2
       exit 1
@@ -187,7 +213,7 @@ case "${deploy_mode}" in
       echo "ERROR: no active images resolved for profiles '${COMPOSE_PROFILES}'; refusing to deploy." >&2
       exit 1
     fi
-    # (a) exact multiset correspondence to the five supplied refs (missing/unexpected/duplicate fails).
+    # Exact multiset correspondence to the five supplied refs (missing/unexpected/duplicate fails).
     expected_images_norm="$(printf '%s\n' "${RTDP_IMAGE-}" "${RTDP_MINIO_IMAGE-}" "${RTDP_MINIO_MC_IMAGE-}" \
       "${RTDP_CADDY_IMAGE-}" "${RTDP_DATADOG_IMAGE-}" | LC_ALL=C sort)"
     active_images_norm="$(printf '%s\n' "${active_images}" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort)"
@@ -197,7 +223,7 @@ case "${deploy_mode}" in
       echo "       observed: $(printf '%s ' ${active_images_norm})" >&2
       fail=1
     fi
-    # (b) each active image is a strict digest ref AND present locally.
+    # 5) each active image is a strict digest ref AND present locally (no pull).
     while IFS= read -r img; do
       [ -n "${img}" ] || continue
       if ! is_digest_ref "${img}"; then

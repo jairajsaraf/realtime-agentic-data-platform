@@ -16,10 +16,26 @@
 #   DEPLOY_HEALTH_RETRIES   health-check attempts           (default: 60)
 #   DEPLOY_HEALTH_INTERVAL  seconds between attempts        (default: 2)
 #   RTDP_DEPLOY_NO_DOPPLER  set to 1 to skip the doppler wrapper even if doppler is installed
+#   RTDP_DEPLOY_MODE        deploy mode (default: normal). Allow-listed:
+#                             normal        registry pull then `up -d` (today's behavior, unchanged).
+#                             local-pinned  deterministic, DIGEST-ONLY, NO pull, NO build. Every one of
+#                                           the five image refs below (and every effective active image)
+#                                           must be a digest ref repo@sha256:<64hex> already present
+#                                           locally, else it fails closed before touching the stack.
+#                           Any other value is rejected.
+#   RTDP_IMAGE / RTDP_MINIO_IMAGE / RTDP_MINIO_MC_IMAGE / RTDP_CADDY_IMAGE / RTDP_DATADOG_IMAGE
+#                           the five service image refs (NON-SECRET). Tags in normal mode; exact digest
+#                           refs required in local-pinned. Injected explicitly (see below), not via Doppler.
 
 set -euo pipefail
 
 log() { printf '>> %s\n' "$*"; }
+
+# True only for a strict image DIGEST reference: a non-empty, whitespace-free, single-`@` repository
+# followed by @sha256:<exactly 64 lowercase hex>. Anchored both ends, so it rejects an empty repo
+# prefix, whitespace anywhere in the repo, an extra `@`, a tag, a short/long digest, uppercase hex,
+# and any trailing characters. Used for both the five image variables and every active Compose image.
+is_digest_ref() { [[ "$1" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; }
 
 # --- locate the repo root from this script's path, then run from there so the compose `build:`
 #     context (..) and the relative ./Caddyfile both resolve correctly ---
@@ -101,11 +117,115 @@ else
 fi
 
 log "Profiles: ${COMPOSE_PROFILES}"
-log "Pulling images..."
-"${runner[@]}" "${compose[@]}" pull
 
-log "Starting/updating the stack..."
-"${runner[@]}" "${compose[@]}" up -d
+# --- deploy mode (allow-listed; default = normal) ---
+# normal:       today's behavior — `docker compose pull` then `up -d` (registry pull on mutable tags).
+# local-pinned: deterministic, DIGEST-ONLY, NO pull, NO build. Every effective active image must be a
+#               digest ref (repo@sha256:<64 lowercase hex>) that is ALREADY present locally; fail closed
+#               otherwise. The five image refs are injected explicitly via `env` AFTER the doppler
+#               wrapper (non-secret; not stored in Doppler), so image identity does not depend on Doppler.
+# Any other value is rejected (fail closed).
+deploy_mode="${RTDP_DEPLOY_MODE:-normal}"
+case "${deploy_mode}" in
+  normal)
+    log "Deploy mode: normal (registry pull enabled)."
+    log "Pulling images..."
+    "${runner[@]}" "${compose[@]}" pull
+
+    log "Starting/updating the stack..."
+    "${runner[@]}" "${compose[@]}" up -d
+    ;;
+  local-pinned)
+    log "==> DEPLOY MODE: LOCAL-PINNED (deterministic; DIGEST-ONLY; NO pull, NO build) <=="
+    # Explicit, non-secret image refs injected AFTER the doppler wrapper (independent of Doppler). Use
+    # `-` (not `:-`) so an unset var stays empty and FAILS the digest check below rather than silently
+    # falling back to a tag default.
+    img_env=(env
+      "RTDP_IMAGE=${RTDP_IMAGE-}"
+      "RTDP_MINIO_IMAGE=${RTDP_MINIO_IMAGE-}"
+      "RTDP_MINIO_MC_IMAGE=${RTDP_MINIO_MC_IMAGE-}"
+      "RTDP_CADDY_IMAGE=${RTDP_CADDY_IMAGE-}"
+      "RTDP_DATADOG_IMAGE=${RTDP_DATADOG_IMAGE-}")
+
+    # 1) Each of the five image variables must itself be a strict digest ref repo@sha256:<64 lc hex>.
+    for v in RTDP_IMAGE RTDP_MINIO_IMAGE RTDP_MINIO_MC_IMAGE RTDP_CADDY_IMAGE RTDP_DATADOG_IMAGE; do
+      val="${!v-}"
+      if ! is_digest_ref "${val}"; then
+        echo "ERROR: ${v} must be a digest ref 'repo@sha256:<64hex>'; got '${val:-<empty>}'." >&2
+        exit 1
+      fi
+    done
+
+    # 2) The effective active SERVICE multiset (for the selected profiles) must equal EXACTLY the five
+    #    expected production services — a missing required service, an unexpected service (incl.
+    #    `stream`), a duplicate, or an empty result all fail closed. Compare sorted line lists WITH
+    #    duplicates preserved (no `sort -u`, which would hide a duplicate). LC_ALL=C for a stable order.
+    expected_services_norm="$(printf '%s\n' api caddy datadog-agent minio minio-init | LC_ALL=C sort)"
+    if ! active_services="$("${runner[@]}" "${img_env[@]}" "${compose[@]}" config --services)"; then
+      echo "ERROR: 'docker compose config --services' failed while resolving the active service set." >&2
+      exit 1
+    fi
+    active_services_norm="$(printf '%s\n' "${active_services}" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort)"
+    fail=0
+    if [ "${active_services_norm}" != "${expected_services_norm}" ]; then
+      echo "ERROR: local-pinned active service set must equal exactly the five expected services." >&2
+      echo "       expected: $(printf '%s ' ${expected_services_norm})" >&2
+      echo "       observed: $(printf '%s ' ${active_services_norm:-<empty>})" >&2
+      fail=1
+    fi
+
+    # 3) The effective active IMAGE multiset must (a) equal EXACTLY the five supplied digest refs
+    #    (sorted, duplicates preserved — no `sort -u`, so a duplicate-image render is caught), and
+    #    (b) every active image must be a strict digest ref AND present locally (no pull). Capture
+    #    first so a failed render or an empty active set fails closed (an empty set would otherwise
+    #    skip the loop and pass silently).
+    if ! active_images="$("${runner[@]}" "${img_env[@]}" "${compose[@]}" config --images)"; then
+      echo "ERROR: 'docker compose config --images' failed while resolving the active image set." >&2
+      exit 1
+    fi
+    if [ -z "${active_images//[[:space:]]/}" ]; then
+      echo "ERROR: no active images resolved for profiles '${COMPOSE_PROFILES}'; refusing to deploy." >&2
+      exit 1
+    fi
+    # (a) exact multiset correspondence to the five supplied refs (missing/unexpected/duplicate fails).
+    expected_images_norm="$(printf '%s\n' "${RTDP_IMAGE-}" "${RTDP_MINIO_IMAGE-}" "${RTDP_MINIO_MC_IMAGE-}" \
+      "${RTDP_CADDY_IMAGE-}" "${RTDP_DATADOG_IMAGE-}" | LC_ALL=C sort)"
+    active_images_norm="$(printf '%s\n' "${active_images}" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort)"
+    if [ "${active_images_norm}" != "${expected_images_norm}" ]; then
+      echo "ERROR: local-pinned active image set must correspond exactly to the five supplied digest refs." >&2
+      echo "       expected: $(printf '%s ' ${expected_images_norm})" >&2
+      echo "       observed: $(printf '%s ' ${active_images_norm})" >&2
+      fail=1
+    fi
+    # (b) each active image is a strict digest ref AND present locally.
+    while IFS= read -r img; do
+      [ -n "${img}" ] || continue
+      if ! is_digest_ref "${img}"; then
+        echo "ERROR: active image is not a digest ref: ${img}" >&2
+        fail=1
+        continue
+      fi
+      if id="$(docker image inspect --format '{{.Id}}' "${img}" 2>/dev/null)"; then
+        log "local-pinned image OK: ${img} (local id ${id})"
+      else
+        echo "ERROR: active image not present locally (no pull in local-pinned): ${img}" >&2
+        fail=1
+      fi
+    done <<< "${active_images}"
+
+    if [ "${fail}" -ne 0 ]; then
+      echo "ERROR: local-pinned preconditions failed; refusing to deploy." >&2
+      exit 1
+    fi
+
+    log "Starting/updating the stack (no pull, no build)..."
+    "${runner[@]}" "${img_env[@]}" "${compose[@]}" up -d --pull never --no-build
+    ;;
+  *)
+    echo "ERROR: unknown RTDP_DEPLOY_MODE='${deploy_mode}' (allowed: normal, local-pinned)." >&2
+    exit 1
+    ;;
+esac
 
 # --- post-deploy liveness check (plain HTTP against the local API; no external dependency) ---
 # Probes /livez (liveness): 200 whenever the API process serves, independent of whether a table

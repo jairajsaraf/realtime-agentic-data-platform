@@ -7,7 +7,7 @@ import pytest
 pytest.importorskip("langchain", reason="requires the optional [agent] extra")
 
 from langchain_core.messages import AIMessage  # noqa: E402
-from langchain_core.messages.tool import tool_call  # noqa: E402
+from langchain_core.messages.tool import invalid_tool_call, tool_call  # noqa: E402
 
 from rtdp.agent.llm import ScriptedChatModel  # noqa: E402
 from rtdp.agent.loop import run_agent  # noqa: E402
@@ -218,3 +218,53 @@ def test_package_exports_resolve_lazily():
     assert agent_pkg.ScriptedChatModel is ScriptedChatModel
     with pytest.raises(AttributeError):
         agent_pkg.no_such_name  # noqa: B018
+
+
+def test_unknown_tool_attempts_count_against_the_tool_budget():
+    # The limiter counts the model's requested calls before any run, unknown names included, so
+    # an unknown tool consumes budget exactly like the pre-LangChain loop did.
+    script = [_calls(("a", "delete_flights", {}), ("b", "flights", {})), AIMessage(content="done")]
+    executor = _FakeExecutor(
+        {
+            "delete_flights": ToolResult(
+                "delete_flights", "unknown:delete_flights", {}, ok=False, error="unknown tool"
+            ),
+            "flights": ToolResult("flights", "GET /flights", {}, ok=True, snapshot_id=1, data={}),
+        }
+    )
+    result = _run("q", ScriptedChatModel(script), executor, max_tool_calls=1)
+
+    assert [name for name, _ in executor.calls] == ["delete_flights"]
+    assert result.error == "max_tool_calls exhausted"
+    assert result.citation_line() == "Sources: unknown:delete_flights"
+
+
+def test_malformed_tool_calls_run_after_well_formed_ones():
+    # Documented ordering (see _degrade_invalid_tool_calls): LangChain keeps well-formed and
+    # malformed calls in separate lists, so a malformed call degraded to {} runs last.
+    def response():
+        return AIMessage(
+            content="",
+            tool_calls=[tool_call(name="flights", args={"icao24": "a"}, id="b")],
+            invalid_tool_calls=[
+                invalid_tool_call(name="flights_bbox", args='{"min_lat": 4', id="a", error="bad")
+            ],
+        )
+
+    canned = {
+        "flights": ToolResult("flights", "GET /flights", {}, ok=True, snapshot_id=1, data={}),
+        "flights_bbox": ToolResult(
+            "flights_bbox", "GET /flights/bbox", {}, ok=False, error="missing min_lat"
+        ),
+    }
+    unbounded = _FakeExecutor(canned)
+    _run("q", ScriptedChatModel([response(), AIMessage(content="done")]), unbounded)
+    assert unbounded.calls == [("flights", {"icao24": "a"}), ("flights_bbox", {})]
+
+    budget_of_one = _FakeExecutor(canned)
+    result = _run(
+        "q", ScriptedChatModel([response(), AIMessage(content="done")]), budget_of_one,
+        max_tool_calls=1,
+    )
+    assert [name for name, _ in budget_of_one.calls] == ["flights"]
+    assert result.error == "max_tool_calls exhausted"

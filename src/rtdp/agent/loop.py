@@ -106,6 +106,11 @@ def _degrade_invalid_tool_calls(message: AIMessage) -> AIMessage:
 
     LangChain records malformed arguments as ``invalid_tool_calls`` and would end the run on
     them; the executor's own validation (missing required params, type errors) answers instead.
+
+    Ordering: LangChain parses well-formed and malformed calls into separate lists and keeps no
+    record of how they interleaved on the wire, so degraded calls run after the well-formed calls
+    of the same response. Under a tool budget that runs out within that response, the
+    well-formed calls are the ones that run (the pre-LangChain loop kept wire order).
     """
     if not message.invalid_tool_calls:
         return message

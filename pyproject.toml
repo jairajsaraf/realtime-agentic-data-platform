@@ -37,6 +37,13 @@ otel = [
 mcp = [
     "mcp>=1.28,<2",
 ]
+# Opt-in agent runtime (Stage D): LangChain `create_agent` over an OpenAI-compatible endpoint.
+# NOT installed by default; `rtdp agent` exits with an install hint unless this extra is present.
+# Install with: uv sync --extra agent
+agent = [
+    "langchain>=1,<2",
+    "langchain-openai>=1,<2",
+]
 
 [dependency-groups]
 dev = [
@@ -58,6 +65,20 @@ addopts = "-q"
 markers = [
     "localstack: integration tests that require a running LocalStack S3 (deselect with -m 'not localstack')",
 ]
+
+# Supply-chain cooldown for the fast-moving [agent] dependency tree: only versions uploaded before
+# this date resolve. Move the date forward deliberately when upgrading the agent stack.
+[tool.uv.exclude-newer-package]
+langchain = "2026-10-19T00:00:00Z"
+langchain-core = "2026-10-19T00:00:00Z"
+langchain-openai = "2026-10-19T00:00:00Z"
+langchain-protocol = "2026-10-19T00:00:00Z"
+langgraph = "2026-10-19T00:00:00Z"
+langgraph-checkpoint = "2026-10-19T00:00:00Z"
+langgraph-prebuilt = "2026-10-19T00:00:00Z"
+langgraph-sdk = "2026-10-19T00:00:00Z"
+langsmith = "2026-10-19T00:00:00Z"
+openai = "2026-10-19T00:00:00Z"
 
 [tool.ruff]
 line-length = 100

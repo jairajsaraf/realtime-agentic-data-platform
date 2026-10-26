@@ -172,8 +172,24 @@ def _maintain(settings: Settings, args: argparse.Namespace) -> int:
     return 1
 
 
+# Top-level modules of the optional [agent] extra; an ImportError naming anything else is a bug.
+_AGENT_SDK_MODULES = {"langchain", "langchain_core", "langchain_openai", "langgraph", "openai"}
+
+
 def _agent(settings: Settings, args: argparse.Namespace) -> int:
-    from .agent.runtime import answer_question, build_http_client, build_llm_client
+    try:
+        from .agent.runtime import answer_question, build_http_client, build_llm_client
+    except ImportError as exc:
+        # Only a missing [agent] SDK means "install the extra"; any other ImportError is a real
+        # failure (e.g. a bug inside rtdp.agent) and must surface, not be masked.
+        if (exc.name or "").partition(".")[0] not in _AGENT_SDK_MODULES:
+            raise
+        print(
+            "The agent requires the optional [agent] extra.\n"
+            "Install it with: uv sync --extra agent   (or: pip install 'rtdp[agent]')",
+            file=sys.stderr,
+        )
+        return 2
 
     overrides: dict = {}
     if args.api_url is not None:
@@ -315,7 +331,10 @@ def main(argv: list[str] | None = None) -> int:
 
     agent = sub.add_parser(
         "agent",
-        help="Natural-language agent over the read API (Stage D; read-only, HITL)",
+        help=(
+            "Natural-language agent over the read API (Stage D; read-only, HITL; "
+            "requires the optional [agent] extra)"
+        ),
     )
     agent.add_argument(
         "question", nargs="?", default=None, help="question to ask (omit for interactive mode)"

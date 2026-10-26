@@ -90,6 +90,34 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
 
+  # Run the agent suite with the optional [agent] extra (LangChain). The default `test` job installs
+  # no extra, so the loop/model/golden/CLI-wiring tests skip there and only the import-guard,
+  # boundary, tool, and DQ tests run. Deterministic and offline: a scripted chat model stands in for
+  # the LLM and the read API is an httpx MockTransport; no key, no network. Does not gate
+  # publish-image/deploy — the deployed image never includes the [agent] extra.
+  agent-extra:
+    name: agent ([agent] extra)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.21"
+      - name: Install Python 3.12
+        run: uv python install 3.12
+      - name: Sync dependencies (with [agent] extra)
+        run: uv sync --frozen --extra agent
+      - name: Agent tests (golden transcripts, loop, model boundary, CLI wiring, tools, DQ)
+        run: uv run --extra agent -- pytest tests/test_agent_boundary.py tests/test_agent_golden.py tests/test_agent_loop.py tests/test_agent_llm.py tests/test_agent_cli.py tests/test_agent_tools.py tests/test_agent_dq.py -m "not localstack" --cov=rtdp.agent --cov-branch --cov-report=xml
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+
   integration-localstack:
     name: integration tests (LocalStack S3)
     runs-on: ubuntu-latest

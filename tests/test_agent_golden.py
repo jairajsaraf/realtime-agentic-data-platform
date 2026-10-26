@@ -18,41 +18,59 @@ from pathlib import Path
 import httpx
 import pytest
 
-from rtdp.agent.llm import ChatResponse, FakeLLMClient, _parse_tool_calls
-from rtdp.agent.loop import run_agent
-from rtdp.agent.tools import ApiToolExecutor, static_registry
+pytest.importorskip("langchain", reason="requires the optional [agent] extra")
+
+from langchain_core.exceptions import OutputParserException  # noqa: E402
+from langchain_core.messages import AIMessage  # noqa: E402
+from langchain_core.output_parsers.openai_tools import (  # noqa: E402
+    make_invalid_tool_call,
+    parse_tool_call,
+)
+
+from rtdp.agent.llm import ScriptedChatModel  # noqa: E402
+from rtdp.agent.loop import run_agent  # noqa: E402
+from rtdp.agent.tools import ApiToolExecutor, static_registry  # noqa: E402
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "agent_golden"
 FIXTURES = sorted(FIXTURE_DIR.glob("*.json"))
 _API_BASE = "http://api.test"
 
 
-def _turn_to_response(turn: dict, turn_index: int, repeating: bool) -> ChatResponse:
-    """Neutral turn -> the loop's model-response type (the ONLY implementation-specific part)."""
-    wire_calls = []
+def _turn_to_message(turn: dict, turn_index: int, repeating: bool) -> AIMessage:
+    """Neutral turn -> the loop's model-response type (the ONLY implementation-specific part).
+
+    Raw tool-call JSON goes through the same langchain_core parser ChatOpenAI uses, so a
+    malformed payload lands in ``invalid_tool_calls`` exactly as it would from a live endpoint.
+    """
+    tool_calls, invalid_tool_calls = [], []
     for call in turn.get("tool_calls", []):
         call_id = f"{call['id']}-t{turn_index}" if repeating else call["id"]
         raw = call["raw_arguments"] if "raw_arguments" in call else json.dumps(call["arguments"])
-        wire_calls.append({"id": call_id, "function": {"name": call["name"], "arguments": raw}})
+        wire = {"id": call_id, "function": {"name": call["name"], "arguments": raw}}
+        try:
+            tool_calls.append(parse_tool_call(wire, return_id=True))
+        except OutputParserException as exc:
+            invalid_tool_calls.append(make_invalid_tool_call(wire, str(exc)))
     usage = turn.get("usage")
-    return ChatResponse(
-        content=turn.get("content"),
-        tool_calls=_parse_tool_calls(wire_calls),
-        usage=None if usage is None else {"total_tokens": usage["total_tokens"]},
+    return AIMessage(
+        content=turn.get("content") or "",
+        tool_calls=tool_calls,
+        invalid_tool_calls=invalid_tool_calls,
+        usage_metadata=usage,
     )
 
 
-def _scripted_llm(case: dict):
+def _scripted_llm(case: dict) -> ScriptedChatModel:
     turns = case["turns"]
     if not case.get("repeat_last_turn"):
-        return FakeLLMClient([_turn_to_response(t, i, False) for i, t in enumerate(turns, 1)])
+        return ScriptedChatModel([_turn_to_message(t, i, False) for i, t in enumerate(turns, 1)])
     state = {"n": 0}
 
-    def respond(_messages, _tools):
+    def respond(_messages):
         state["n"] += 1
-        return _turn_to_response(turns[min(state["n"], len(turns)) - 1], state["n"], True)
+        return _turn_to_message(turns[min(state["n"], len(turns)) - 1], state["n"], True)
 
-    return FakeLLMClient(respond)
+    return ScriptedChatModel(respond)
 
 
 def _api_client(api: dict, calls: list) -> httpx.Client:

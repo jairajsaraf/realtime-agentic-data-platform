@@ -1,13 +1,74 @@
-"""CLI wiring tests for `rtdp agent` (offline: MockTransport API + fake LLM, no keys/network)."""
+"""CLI tests for `rtdp agent` (offline: MockTransport API + scripted model, no keys/network).
+
+The import-guard tests run on the DEFAULT install (no extra), mirroring tests/test_mcp_cli.py:
+the install hint appears only when the missing module belongs to the [agent] SDK; any other
+ImportError must re-raise. The wiring tests need the optional [agent] extra and skip without it.
+"""
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
+import sys
 
 import httpx
+import pytest
 
-from rtdp.agent.llm import ChatResponse, FakeLLMClient, ToolCall
 from rtdp.cli import main
+
+requires_agent_extra = pytest.mark.skipif(
+    importlib.util.find_spec("langchain") is None,
+    reason="requires the optional [agent] extra",
+)
+_SDK_TOP_LEVEL = ("langchain", "langchain_core", "langchain_openai", "langgraph", "openai")
+
+
+def _block_agent_sdk(monkeypatch):
+    """Simulate the missing [agent] extra even when it is installed (cf. _block_mcp_sdk).
+
+    Cached SDK and rtdp.agent modules are purged so the CLI's lazy import really re-imports,
+    and the parent ``rtdp`` attribute is dropped so no stale ``rtdp.agent`` binding survives.
+    """
+    for name in [m for m in sys.modules if m.partition(".")[0] in _SDK_TOP_LEVEL]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    for top in _SDK_TOP_LEVEL:
+        monkeypatch.setitem(sys.modules, top, None)
+    for name in [m for m in sys.modules if m == "rtdp.agent" or m.startswith("rtdp.agent.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    import rtdp
+
+    if hasattr(rtdp, "agent"):
+        monkeypatch.delattr(rtdp, "agent")
+
+
+# ------------------------------------------------------------------ import guard (default install)
+def test_cli_agent_missing_extra_exits_2_with_hint(monkeypatch, capsys):
+    _block_agent_sdk(monkeypatch)
+    rc = main(["agent", "q"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--extra agent" in err
+    assert "rtdp[agent]" in err
+
+
+def test_cli_agent_reraises_non_sdk_import_errors(monkeypatch):
+    # A failure inside our own module (name not an SDK) must surface, never show the hint.
+    monkeypatch.setitem(sys.modules, "rtdp.agent.runtime", None)
+    with pytest.raises(ImportError):
+        main(["agent", "q"])
+
+
+def test_core_cli_and_agent_tool_layer_work_with_sdk_blocked(monkeypatch, capsys):
+    _block_agent_sdk(monkeypatch)
+    assert main(["info"]) == 0
+    assert "Resolved RTDP configuration" in capsys.readouterr().out
+    # The tool layer (read-only HTTP tools + DQ re-derivation) needs no extra.
+    tools = importlib.import_module("rtdp.agent.tools")
+    assert "flights" in tools.static_registry().names()
+
+
+# ------------------------------------------------------------------ CLI wiring ([agent] extra)
 
 OPENAPI = {
     "paths": {
@@ -50,18 +111,25 @@ def _patch_api(monkeypatch, handler=_api_handler):
 
 
 def _patch_llm(monkeypatch, script):
+    from rtdp.agent.llm import ScriptedChatModel
+
     monkeypatch.setattr(
-        "rtdp.agent.runtime.build_llm_client", lambda settings: FakeLLMClient(script)
+        "rtdp.agent.runtime.build_llm_client", lambda settings: ScriptedChatModel(script)
     )
 
 
 def _answer_script():
+    from langchain_core.messages import AIMessage
+    from langchain_core.messages.tool import tool_call
+
     return [
-        ChatResponse(tool_calls=[ToolCall("c1", "flights", {"icao24": "abc"})]),
-        ChatResponse(content="There is 1 record for abc."),
+        AIMessage(content="", tool_calls=[tool_call(name="flights", args={"icao24": "abc"},
+                                                     id="c1")]),
+        AIMessage(content="There is 1 record for abc."),
     ]
 
 
+@requires_agent_extra
 def test_cli_agent_one_shot(monkeypatch, capsys):
     _patch_api(monkeypatch)
     _patch_llm(monkeypatch, _answer_script())
@@ -73,6 +141,7 @@ def test_cli_agent_one_shot(monkeypatch, capsys):
     assert "GET /flights @ snapshot 42" in out
 
 
+@requires_agent_extra
 def test_cli_agent_json_output(monkeypatch, capsys):
     _patch_api(monkeypatch)
     _patch_llm(monkeypatch, _answer_script())
@@ -85,6 +154,7 @@ def test_cli_agent_json_output(monkeypatch, capsys):
     assert payload["provenance"][0]["snapshot_id"] == 42
 
 
+@requires_agent_extra
 def test_cli_agent_interactive(monkeypatch, capsys):
     _patch_api(monkeypatch)
     _patch_llm(monkeypatch, _answer_script())
@@ -97,6 +167,7 @@ def test_cli_agent_interactive(monkeypatch, capsys):
     assert "There is 1 record for abc." in out
 
 
+@requires_agent_extra
 def test_cli_agent_api_unreachable_returns_2(monkeypatch, capsys):
     def down_handler(request):
         raise httpx.ConnectError("connection refused")
@@ -110,6 +181,7 @@ def test_cli_agent_api_unreachable_returns_2(monkeypatch, capsys):
     assert "rtdp serve" in err
 
 
+@requires_agent_extra
 def test_cli_agent_missing_model_config_returns_2(monkeypatch, capsys):
     # API reachable, but no live model configured -> clear error (real build_llm_client raises).
     _patch_api(monkeypatch)

@@ -1,0 +1,59 @@
+{
+  "name": "06_tool_transport_error",
+  "question": "How many records are there for abc001?",
+  "max_turns": 6,
+  "max_tool_calls": 12,
+  "api": {
+    "/flights": "transport_error"
+  },
+  "turns": [
+    {
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "flights",
+          "arguments": {
+            "icao24": "abc001"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 25,
+        "output_tokens": 5,
+        "total_tokens": 30
+      }
+    },
+    {
+      "content": "The read API could not be reached, so I cannot answer.",
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 4,
+        "total_tokens": 22
+      }
+    }
+  ],
+  "repeat_last_turn": false,
+  "expected": {
+    "answer": "The read API could not be reached, so I cannot answer.",
+    "citation_line": "Sources: GET /flights",
+    "provenance": [
+      {
+        "endpoint": "GET /flights",
+        "snapshot_id": null
+      }
+    ],
+    "turns": 2,
+    "complete": true,
+    "error": null,
+    "tokens": 52,
+    "api_calls": [
+      [
+        "/flights",
+        {
+          "icao24": "abc001"
+        }
+      ]
+    ]
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "name": "10_unknown_tool_name",
+  "question": "Delete all flights for abc001.",
+  "max_turns": 6,
+  "max_tool_calls": 12,
+  "api": {},
+  "turns": [
+    {
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "delete_flights",
+          "arguments": {
+            "icao24": "abc001"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 4,
+        "total_tokens": 24
+      }
+    },
+    {
+      "content": "I am read-only: there is no delete tool, so nothing was changed.",
+      "usage": {
+        "input_tokens": 26,
+        "output_tokens": 8,
+        "total_tokens": 34
+      }
+    }
+  ],
+  "repeat_last_turn": false,
+  "expected": {
+    "answer": "I am read-only: there is no delete tool, so nothing was changed.",
+    "citation_line": "Sources: unknown:delete_flights",
+    "provenance": [
+      {
+        "endpoint": "unknown:delete_flights",
+        "snapshot_id": null
+      }
+    ],
+    "turns": 2,
+    "complete": true,
+    "error": null,
+    "tokens": 58,
+    "api_calls": []
+  }
+}

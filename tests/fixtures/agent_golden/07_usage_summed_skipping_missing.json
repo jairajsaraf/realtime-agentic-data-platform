@@ -1,0 +1,129 @@
+{
+  "name": "07_usage_summed_skipping_missing",
+  "question": "Which snapshots exist, and what is the latest count for abc001?",
+  "max_turns": 6,
+  "max_tool_calls": 12,
+  "api": {
+    "/snapshots": {
+      "status": 200,
+      "json": [
+        {
+          "snapshot_id": 41,
+          "timestamp": "2026-06-14T09:00:00Z",
+          "operation": "append",
+          "summary": {
+            "added-records": "6"
+          }
+        },
+        {
+          "snapshot_id": 42,
+          "timestamp": "2026-06-14T10:00:00Z",
+          "operation": "append",
+          "summary": {
+            "added-records": "1"
+          }
+        }
+      ]
+    },
+    "/flights": {
+      "status": 200,
+      "json": {
+        "snapshot_id": 42,
+        "count": 1,
+        "items": [
+          {
+            "icao24": "abc001",
+            "callsign": "TST001",
+            "origin_country": "Testland",
+            "event_time": "2026-06-14T10:00:00Z",
+            "time_position": 1781431200,
+            "last_contact": 1781431200,
+            "longitude": 8.5,
+            "latitude": 50.0,
+            "baro_altitude": 10000.0,
+            "geo_altitude": 10100.0,
+            "on_ground": false,
+            "velocity": 230.0,
+            "true_track": 90.0,
+            "vertical_rate": 0.0,
+            "squawk": "1000",
+            "spi": false,
+            "position_source": 0,
+            "category": 0,
+            "ingest_time": "2026-06-14T10:00:05Z",
+            "ingest_batch_id": "batch-0001",
+            "source_name": "synthetic"
+          }
+        ]
+      }
+    }
+  },
+  "turns": [
+    {
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "snapshots",
+          "arguments": {}
+        }
+      ],
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 5,
+        "total_tokens": 25
+      }
+    },
+    {
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "flights",
+          "arguments": {
+            "icao24": "abc001"
+          }
+        }
+      ]
+    },
+    {
+      "content": "Snapshots 41 and 42 exist; abc001 has 1 record at snapshot 42.",
+      "usage": {
+        "input_tokens": 9,
+        "output_tokens": 3,
+        "total_tokens": 12
+      }
+    }
+  ],
+  "repeat_last_turn": false,
+  "expected": {
+    "answer": "Snapshots 41 and 42 exist; abc001 has 1 record at snapshot 42.",
+    "citation_line": "Sources: GET /snapshots; GET /flights @ snapshot 42",
+    "provenance": [
+      {
+        "endpoint": "GET /snapshots",
+        "snapshot_id": null
+      },
+      {
+        "endpoint": "GET /flights",
+        "snapshot_id": 42
+      }
+    ],
+    "turns": 3,
+    "complete": true,
+    "error": null,
+    "tokens": 37,
+    "api_calls": [
+      [
+        "/flights",
+        {
+          "icao24": "abc001"
+        }
+      ],
+      [
+        "/snapshots",
+        {}
+      ]
+    ]
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "name": "04_max_turns_exhausted",
+  "question": "Keep looking.",
+  "max_turns": 3,
+  "max_tool_calls": 12,
+  "api": {
+    "/flights": {
+      "status": 200,
+      "json": {
+        "snapshot_id": 1,
+        "count": 0,
+        "items": []
+      }
+    }
+  },
+  "turns": [
+    {
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "c",
+          "name": "flights",
+          "arguments": {}
+        }
+      ],
+      "usage": {
+        "input_tokens": 8,
+        "output_tokens": 2,
+        "total_tokens": 10
+      }
+    }
+  ],
+  "repeat_last_turn": true,
+  "expected": {
+    "answer": "Stopped: reached the tool-call budget before producing a final answer.",
+    "citation_line": "Sources: GET /flights @ snapshot 1",
+    "provenance": [
+      {
+        "endpoint": "GET /flights",
+        "snapshot_id": 1
+      },
+      {
+        "endpoint": "GET /flights",
+        "snapshot_id": 1
+      },
+      {
+        "endpoint": "GET /flights",
+        "snapshot_id": 1
+      }
+    ],
+    "turns": 3,
+    "complete": false,
+    "error": "max_turns exhausted",
+    "tokens": 30,
+    "api_calls": [
+      [
+        "/flights",
+        {}
+      ],
+      [
+        "/flights",
+        {}
+      ],
+      [
+        "/flights",
+        {}
+      ]
+    ]
+  }
+}

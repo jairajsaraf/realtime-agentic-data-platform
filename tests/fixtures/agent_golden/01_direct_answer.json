@@ -1,0 +1,28 @@
+{
+  "name": "01_direct_answer",
+  "question": "What can you tell me about?",
+  "max_turns": 6,
+  "max_tool_calls": 12,
+  "api": {},
+  "turns": [
+    {
+      "content": "I answer questions about the flight data using the read API.",
+      "usage": {
+        "input_tokens": 15,
+        "output_tokens": 6,
+        "total_tokens": 21
+      }
+    }
+  ],
+  "repeat_last_turn": false,
+  "expected": {
+    "answer": "I answer questions about the flight data using the read API.",
+    "citation_line": "Sources: (no tool calls)",
+    "provenance": [],
+    "turns": 1,
+    "complete": true,
+    "error": null,
+    "tokens": 21,
+    "api_calls": []
+  }
+}

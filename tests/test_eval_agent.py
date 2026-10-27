@@ -152,3 +152,21 @@ def test_dry_run_prints_preregistration_and_truth(capsys):
     printed = json.loads(capsys.readouterr().out)
     assert printed["frozen_mismatches"] == []
     assert printed["ground_truth"]["total_rows"] == 108
+
+
+def test_main_removes_its_workdir_and_tolerates_locked_files(monkeypatch, tmp_path):
+    # Windows cannot delete a SQLite file that is still open; cleanup must never fail the run.
+    monkeypatch.setattr(harness.tempfile, "tempdir", str(tmp_path))
+    real_rmtree = harness.shutil.rmtree
+    calls = []
+
+    def locked_rmtree(path, ignore_errors=False):
+        calls.append(ignore_errors)
+        if not ignore_errors:
+            raise PermissionError("file in use")
+        real_rmtree(path, ignore_errors=True)
+
+    monkeypatch.setattr(harness.shutil, "rmtree", locked_rmtree)
+    assert harness.main(["--dry-run"]) == 0
+    assert calls == [True]
+    assert not list(tmp_path.glob("rtdp-eval-*"))

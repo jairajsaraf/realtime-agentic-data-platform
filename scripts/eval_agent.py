@@ -22,8 +22,10 @@ scores. No keys or raw request payloads are written. Re-score offline with
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -279,6 +281,53 @@ def run_metadata(settings, *, k: int, pause_s: float) -> dict:
 # --------------------------------------------------------------------------- main
 
 
+def _remove_workdir(path: Path) -> None:
+    """Delete the throwaway warehouse without ever failing the run.
+
+    On Windows SQLite keeps catalog.db open until the catalog's engine is garbage-collected, and
+    an open file cannot be deleted; collect first, then remove what can be removed.
+    """
+    gc.collect()
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _evaluate(workdir: Path, args, llm, k: int):
+    """Build the dataset, check it, and run the cases; returns an exit code or the results."""
+    from fastapi.testclient import TestClient
+
+    from rtdp.api.app import create_app
+
+    settings = build_dataset(workdir)
+    with TestClient(create_app(settings), base_url=API_BASE) as client:
+        truth = compute_ground_truth(client)
+        mismatches = check_frozen(truth)
+        if args.dry_run:
+            print(json.dumps({"preregistration": scoring.PREREGISTRATION,
+                              "ground_truth": truth, "frozen_mismatches": mismatches},
+                             indent=2, default=str))
+            return 0 if not mismatches else 2
+        if mismatches:
+            print("Synthetic data does not reproduce the frozen values; aborting before any "
+                  "model call:\n  " + "\n  ".join(mismatches), file=sys.stderr)
+            return 2
+        if llm is None:
+            if not settings.agent_base_url or not settings.agent_model:
+                print("Live eval requires RTDP_AGENT_BASE_URL and RTDP_AGENT_MODEL (and "
+                      "RTDP_AGENT_API_KEY if the endpoint needs one). No calls made.",
+                      file=sys.stderr)
+                return 2
+            from rtdp.agent.runtime import build_llm_client
+
+            listing = model_listing(settings)
+            llm = build_llm_client(settings)
+        else:
+            listing = {"listed": None, "listed_id": None, "models_returned": None}
+        meta = run_metadata(settings, k=k, pause_s=args.pause_seconds)
+        meta["model_listing"] = listing
+        outcome = run_eval(settings, client, llm, truth=truth, k=k, pause_s=args.pause_seconds)
+    return meta, truth, outcome
+
+
 def main(argv: list[str] | None = None, *, llm=None) -> int:
     parser = argparse.ArgumentParser(description="Preregistered live eval for the Stage D agent")
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
@@ -289,39 +338,14 @@ def main(argv: list[str] | None = None, *, llm=None) -> int:
     args = parser.parse_args(argv)
     k = scoring.PREREGISTRATION["k"]
 
-    from fastapi.testclient import TestClient
-
-    from rtdp.api.app import create_app
-
-    with tempfile.TemporaryDirectory(prefix="rtdp-eval-") as tmp:
-        settings = build_dataset(Path(tmp))
-        with TestClient(create_app(settings), base_url=API_BASE) as client:
-            truth = compute_ground_truth(client)
-            mismatches = check_frozen(truth)
-            if args.dry_run:
-                print(json.dumps({"preregistration": scoring.PREREGISTRATION,
-                                  "ground_truth": truth, "frozen_mismatches": mismatches},
-                                 indent=2, default=str))
-                return 0 if not mismatches else 2
-            if mismatches:
-                print("Synthetic data does not reproduce the frozen values; aborting before any "
-                      "model call:\n  " + "\n  ".join(mismatches), file=sys.stderr)
-                return 2
-            if llm is None:
-                if not settings.agent_base_url or not settings.agent_model:
-                    print("Live eval requires RTDP_AGENT_BASE_URL and RTDP_AGENT_MODEL (and "
-                          "RTDP_AGENT_API_KEY if the endpoint needs one). No calls made.",
-                          file=sys.stderr)
-                    return 2
-                from rtdp.agent.runtime import build_llm_client
-
-                listing = model_listing(settings)
-                llm = build_llm_client(settings)
-            else:
-                listing = {"listed": None, "listed_id": None, "models_returned": None}
-            meta = run_metadata(settings, k=k, pause_s=args.pause_seconds)
-            meta["model_listing"] = listing
-            outcome = run_eval(settings, client, llm, truth=truth, k=k, pause_s=args.pause_seconds)
+    workdir = Path(tempfile.mkdtemp(prefix="rtdp-eval-"))
+    try:
+        result = _evaluate(workdir, args, llm, k)
+    finally:
+        _remove_workdir(workdir)
+    if isinstance(result, int):
+        return result
+    meta, truth, outcome = result
 
     report = {
         "preregistration": scoring.PREREGISTRATION,

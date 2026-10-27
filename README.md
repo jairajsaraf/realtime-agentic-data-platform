@@ -147,9 +147,9 @@ endpoint through `RTDP_AGENT_BASE_URL`, `RTDP_AGENT_MODEL`, and `RTDP_AGENT_API_
 - A run is bounded by a model-turn budget and a tool-call budget. LangChain's limit middleware
   enforces them, with small hooks that keep the pre-rewrite behaviour. Golden transcripts recorded
   before the rewrite pin that behaviour.
-- Data-quality diagnosis re-derives anomalies from the rows the API returns. It is
-  a bounded sample (one queried window, capped by the API row limit, over the snapshots queried)
-  and the agent says so.
+- Data-quality diagnosis re-derives anomalies from the rows the API returns. It is a bounded
+  sample (one queried window, capped by the API row limit, over the snapshots queried), and the
+  agent says so.
 - The CI tests use a scripted chat model. No model is called in CI.
 
 The live eval ([`scripts/eval_agent.py`](scripts/eval_agent.py)) is opt-in and network-gated. It is
@@ -190,8 +190,8 @@ portable path, but its host is retired and CI no longer deploys to it.
 `rtdp.telemetry` is the single seam: structured logging always, and OpenTelemetry tracing only
 when `RTDP_OTEL_ENABLED=true` and the `otel` extra is installed. The custom spans are
 `rtdp.ingest.batch` and `rtdp.agent.tool_call`. The Datadog dashboard, monitors, and service check
-in [`deploy/observability/`](deploy/observability/README.md) were validated live on the retired
-host (E6.3); they are not currently deployed. There is no `/metrics` endpoint.
+in [`deploy/observability/`](deploy/observability/README.md) were
+validated live on the retired host (E6.3); not currently deployed. There is no `/metrics` endpoint.
 
 ## Limitations
 

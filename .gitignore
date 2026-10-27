@@ -33,3 +33,11 @@ COMPILER_PRIMER.md
 
 # Opt-in agent eval reports (live model output; never committed)
 _agent_eval_report*.json
+
+# Generated results: only the recorded, reviewed outputs below are committed.
+results/*
+!results/agent_eval.json
+!results/agent_eval_run2.json
+!results/agent_eval_run3.json
+!results/opensky_live_run.json
+!results/metrics.json

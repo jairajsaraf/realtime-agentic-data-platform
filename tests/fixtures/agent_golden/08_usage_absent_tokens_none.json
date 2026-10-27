@@ -1,0 +1,80 @@
+{
+  "name": "08_usage_absent_tokens_none",
+  "question": "How many records are there for abc001?",
+  "max_turns": 6,
+  "max_tool_calls": 12,
+  "api": {
+    "/flights": {
+      "status": 200,
+      "json": {
+        "snapshot_id": 42,
+        "count": 1,
+        "items": [
+          {
+            "icao24": "abc001",
+            "callsign": "TST001",
+            "origin_country": "Testland",
+            "event_time": "2026-06-14T10:00:00Z",
+            "time_position": 1781431200,
+            "last_contact": 1781431200,
+            "longitude": 8.5,
+            "latitude": 50.0,
+            "baro_altitude": 10000.0,
+            "geo_altitude": 10100.0,
+            "on_ground": false,
+            "velocity": 230.0,
+            "true_track": 90.0,
+            "vertical_rate": 0.0,
+            "squawk": "1000",
+            "spi": false,
+            "position_source": 0,
+            "category": 0,
+            "ingest_time": "2026-06-14T10:00:05Z",
+            "ingest_batch_id": "batch-0001",
+            "source_name": "synthetic"
+          }
+        ]
+      }
+    }
+  },
+  "turns": [
+    {
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "flights",
+          "arguments": {
+            "icao24": "abc001"
+          }
+        }
+      ]
+    },
+    {
+      "content": "There is 1 record for abc001 (snapshot 42)."
+    }
+  ],
+  "repeat_last_turn": false,
+  "expected": {
+    "answer": "There is 1 record for abc001 (snapshot 42).",
+    "citation_line": "Sources: GET /flights @ snapshot 42",
+    "provenance": [
+      {
+        "endpoint": "GET /flights",
+        "snapshot_id": 42
+      }
+    ],
+    "turns": 2,
+    "complete": true,
+    "error": null,
+    "tokens": null,
+    "api_calls": [
+      [
+        "/flights",
+        {
+          "icao24": "abc001"
+        }
+      ]
+    ]
+  }
+}

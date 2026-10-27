@@ -1,12 +1,19 @@
-"""Unit tests for the agent loop (fake LLM + fake executor, fully offline/deterministic)."""
+"""Unit tests for the agent loop (scripted model + fake executor, fully offline/deterministic)."""
 
 from __future__ import annotations
 
-from rtdp.agent.llm import ChatResponse, FakeLLMClient, ToolCall
-from rtdp.agent.loop import run_agent
-from rtdp.agent.tools import ToolResult
+import pytest
 
-TOOLS: list[dict] = []  # the fake LLM ignores the tool list; pass an empty one
+pytest.importorskip("langchain", reason="requires the optional [agent] extra")
+
+from langchain_core.messages import AIMessage  # noqa: E402
+from langchain_core.messages.tool import invalid_tool_call, tool_call  # noqa: E402
+
+from rtdp.agent.llm import ScriptedChatModel  # noqa: E402
+from rtdp.agent.loop import run_agent  # noqa: E402
+from rtdp.agent.tools import ToolResult, static_registry  # noqa: E402
+
+TOOLS: list[dict] = static_registry().definitions()
 
 
 class _FakeExecutor:
@@ -21,19 +28,26 @@ class _FakeExecutor:
         return self._results[name]
 
 
+def _calls(*specs: tuple[str, str, dict], usage: dict | None = None) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[tool_call(name=n, args=a, id=i) for i, n, a in specs],
+        usage_metadata=usage,
+    )
+
+
+def _usage(total: int) -> dict:
+    return {"input_tokens": total - 1, "output_tokens": 1, "total_tokens": total}
+
+
 def _run(question, llm, executor, **kw):
     return run_agent(question, llm=llm, executor=executor, tools=TOOLS, **kw)
 
 
 def test_answers_flight_question_via_tool_then_finalizes():
     script = [
-        ChatResponse(
-            tool_calls=[ToolCall("c1", "flights", {"icao24": "abc"})],
-            usage={"total_tokens": 30},
-        ),
-        ChatResponse(
-            content="There is 1 record for abc (snapshot 42).", usage={"total_tokens": 12}
-        ),
+        _calls(("c1", "flights", {"icao24": "abc"}), usage=_usage(30)),
+        AIMessage(content="There is 1 record for abc (snapshot 42).", usage_metadata=_usage(12)),
     ]
     executor = _FakeExecutor(
         {
@@ -43,7 +57,7 @@ def test_answers_flight_question_via_tool_then_finalizes():
             )
         }
     )
-    result = _run("how many for abc?", FakeLLMClient(script), executor)
+    result = _run("how many for abc?", ScriptedChatModel(script), executor)
 
     assert result.complete is True
     assert result.turns == 2
@@ -60,8 +74,8 @@ def test_dq_diagnosis_proposes_without_applying():
         "proposals": ["PROPOSED (requires human approval; not applied): review velocity."],
     }
     script = [
-        ChatResponse(tool_calls=[ToolCall("d1", "diagnose_data_quality", {})]),
-        ChatResponse(content="Found 1 over-speed row; proposed a fix (not applied)."),
+        _calls(("d1", "diagnose_data_quality", {})),
+        AIMessage(content="Found 1 over-speed row; proposed a fix (not applied)."),
     ]
     executor = _FakeExecutor(
         {
@@ -71,7 +85,7 @@ def test_dq_diagnosis_proposes_without_applying():
             )
         }
     )
-    result = _run("any data quality issues?", FakeLLMClient(script), executor)
+    result = _run("any data quality issues?", ScriptedChatModel(script), executor)
 
     assert result.complete is True
     # Only the read-only diagnose tool was called; there is no write tool to call.
@@ -80,25 +94,29 @@ def test_dq_diagnosis_proposes_without_applying():
 
 
 def test_out_of_scope_request_is_refused_without_tool_calls():
-    script = [ChatResponse(content="I'm read-only; I can't modify data, only propose changes.")]
+    script = [AIMessage(content="I'm read-only; I can't modify data, only propose changes.")]
     executor = _FakeExecutor({})
-    result = _run("delete all flights", FakeLLMClient(script), executor)
+    result = _run("delete all flights", ScriptedChatModel(script), executor)
 
     assert result.complete is True
     assert executor.calls == []  # no tool invoked
     assert "read-only" in result.answer
     assert result.citation_line() == "Sources: (no tool calls)"
+    assert result.tokens is None  # no usage reported
 
 
 def test_max_turns_guard_returns_incomplete():
     # The model loops forever requesting a tool; the budget must stop it.
-    llm = FakeLLMClient(
-        lambda messages, tools: ChatResponse(tool_calls=[ToolCall("c", "flights", {})])
-    )
+    counter = {"n": 0}
+
+    def respond(_messages):
+        counter["n"] += 1
+        return _calls((f"c{counter['n']}", "flights", {}))
+
     executor = _FakeExecutor(
         {"flights": ToolResult("flights", "GET /flights", {}, ok=True, snapshot_id=1, data={})}
     )
-    result = _run("loop", llm, executor, max_turns=3)
+    result = _run("loop", ScriptedChatModel(respond), executor, max_turns=3)
 
     assert result.complete is False
     assert result.error == "max_turns exhausted"
@@ -109,55 +127,144 @@ def test_max_turns_guard_returns_incomplete():
 def test_tool_call_budget_caps_executions_within_one_response():
     # One assistant message emits 3 tool calls; the budget of 2 must stop the 3rd from executing.
     script = [
-        ChatResponse(
-            tool_calls=[
-                ToolCall("c1", "flights", {"icao24": "a"}),
-                ToolCall("c2", "flights", {"icao24": "b"}),
-                ToolCall("c3", "flights", {"icao24": "c"}),
-            ]
+        _calls(
+            ("c1", "flights", {"icao24": "a"}),
+            ("c2", "flights", {"icao24": "b"}),
+            ("c3", "flights", {"icao24": "c"}),
         ),
     ]
     executor = _FakeExecutor(
         {"flights": ToolResult("flights", "GET /flights", {}, ok=True, snapshot_id=1, data={})}
     )
-    result = _run("q", FakeLLMClient(script), executor, max_tool_calls=2)
+    result = _run("q", ScriptedChatModel(script), executor, max_tool_calls=2)
 
     assert result.complete is False
     assert result.error == "max_tool_calls exhausted"
     assert len(executor.calls) == 2  # only the first two of three executed
 
 
-def test_multiple_tool_calls_in_one_response_within_budget_all_execute():
+def test_multiple_tool_calls_in_one_response_run_in_model_order():
     script = [
-        ChatResponse(
-            tool_calls=[
-                ToolCall("c1", "flights", {"icao24": "a"}),
-                ToolCall("c2", "flights", {"icao24": "b"}),
-            ]
+        _calls(
+            ("c1", "flights", {"icao24": "a"}),
+            ("c2", "flights", {"icao24": "b"}),
+            ("c3", "flights", {"icao24": "c"}),
         ),
-        ChatResponse(content="done"),
+        AIMessage(content="done"),
     ]
     executor = _FakeExecutor(
         {"flights": ToolResult("flights", "GET /flights", {}, ok=True, snapshot_id=42, data={})}
     )
-    result = _run("q", FakeLLMClient(script), executor, max_tool_calls=5)
+    result = _run("q", ScriptedChatModel(script), executor, max_tool_calls=5)
 
     assert result.complete is True
-    assert len(executor.calls) == 2  # both fit under the budget
+    # Sequential, in the order the model gave them (max_concurrency=1), all under the budget.
+    assert [args["icao24"] for _, args in executor.calls] == ["a", "b", "c"]
 
 
 def test_citation_line_dedupes_repeated_sources():
     script = [
-        ChatResponse(
-            tool_calls=[
-                ToolCall("c1", "flights", {"icao24": "a"}),
-                ToolCall("c2", "flights", {"icao24": "b"}),
-            ]
-        ),
-        ChatResponse(content="done"),
+        _calls(("c1", "flights", {"icao24": "a"}), ("c2", "flights", {"icao24": "b"})),
+        AIMessage(content="done"),
     ]
     executor = _FakeExecutor(
         {"flights": ToolResult("flights", "GET /flights", {}, ok=True, snapshot_id=42, data={})}
     )
-    result = _run("q", FakeLLMClient(script), executor)
+    result = _run("q", ScriptedChatModel(script), executor)
     assert result.citation_line() == "Sources: GET /flights @ snapshot 42"
+
+
+def test_on_event_reports_each_call_and_its_result():
+    script = [_calls(("c1", "flights", {"icao24": "a"})), AIMessage(content="done")]
+    canned = ToolResult("flights", "GET /flights", {}, ok=True, snapshot_id=42, data={})
+    events: list[tuple[str, object]] = []
+    _run(
+        "q", ScriptedChatModel(script), _FakeExecutor({"flights": canned}),
+        on_event=lambda kind, payload: events.append((kind, payload)),
+    )
+    assert [kind for kind, _ in events] == ["tool_call", "tool_result"]
+    assert events[0][1]["name"] == "flights"
+    assert events[1][1] == canned
+
+
+def test_under_scripted_model_surfaces_index_error():
+    script = [_calls(("c1", "flights", {}))]  # no final turn scripted
+    executor = _FakeExecutor(
+        {"flights": ToolResult("flights", "GET /flights", {}, ok=True, snapshot_id=1, data={})}
+    )
+    with pytest.raises(IndexError, match="ran out of scripted responses"):
+        _run("q", ScriptedChatModel(script), executor)
+
+
+def test_langsmith_tracing_is_forced_off(monkeypatch):
+    # Even with tracing switched on in the environment, no run is traced to LangSmith.
+    from langsmith.utils import tracing_is_enabled
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    seen: list[bool] = []
+
+    def respond(_messages):
+        seen.append(bool(tracing_is_enabled()))
+        return AIMessage(content="ok")
+
+    _run("q", ScriptedChatModel(respond), _FakeExecutor({}))
+    assert seen == [False]
+
+
+def test_package_exports_resolve_lazily():
+    import rtdp.agent as agent_pkg
+
+    assert agent_pkg.run_agent is run_agent
+    assert agent_pkg.ScriptedChatModel is ScriptedChatModel
+    with pytest.raises(AttributeError):
+        agent_pkg.no_such_name  # noqa: B018
+
+
+def test_unknown_tool_attempts_count_against_the_tool_budget():
+    # The limiter counts the model's requested calls before any run, unknown names included, so
+    # an unknown tool consumes budget exactly like the pre-LangChain loop did.
+    script = [_calls(("a", "delete_flights", {}), ("b", "flights", {})), AIMessage(content="done")]
+    executor = _FakeExecutor(
+        {
+            "delete_flights": ToolResult(
+                "delete_flights", "unknown:delete_flights", {}, ok=False, error="unknown tool"
+            ),
+            "flights": ToolResult("flights", "GET /flights", {}, ok=True, snapshot_id=1, data={}),
+        }
+    )
+    result = _run("q", ScriptedChatModel(script), executor, max_tool_calls=1)
+
+    assert [name for name, _ in executor.calls] == ["delete_flights"]
+    assert result.error == "max_tool_calls exhausted"
+    assert result.citation_line() == "Sources: unknown:delete_flights"
+
+
+def test_malformed_tool_calls_run_after_well_formed_ones():
+    # Documented ordering (see _degrade_invalid_tool_calls): LangChain keeps well-formed and
+    # malformed calls in separate lists, so a malformed call degraded to {} runs last.
+    def response():
+        return AIMessage(
+            content="",
+            tool_calls=[tool_call(name="flights", args={"icao24": "a"}, id="b")],
+            invalid_tool_calls=[
+                invalid_tool_call(name="flights_bbox", args='{"min_lat": 4', id="a", error="bad")
+            ],
+        )
+
+    canned = {
+        "flights": ToolResult("flights", "GET /flights", {}, ok=True, snapshot_id=1, data={}),
+        "flights_bbox": ToolResult(
+            "flights_bbox", "GET /flights/bbox", {}, ok=False, error="missing min_lat"
+        ),
+    }
+    unbounded = _FakeExecutor(canned)
+    _run("q", ScriptedChatModel([response(), AIMessage(content="done")]), unbounded)
+    assert unbounded.calls == [("flights", {"icao24": "a"}), ("flights_bbox", {})]
+
+    budget_of_one = _FakeExecutor(canned)
+    result = _run(
+        "q", ScriptedChatModel([response(), AIMessage(content="done")]), budget_of_one,
+        max_tool_calls=1,
+    )
+    assert [name for name, _ in budget_of_one.calls] == ["flights"]
+    assert result.error == "max_tool_calls exhausted"

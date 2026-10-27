@@ -1,172 +1,111 @@
-"""Config-driven LLM client boundary for the Stage D agent.
+"""Chat-model boundary for the Stage D agent (requires the optional ``[agent]`` extra).
 
-The agent loop depends only on the small :class:`LLMClient` protocol (``chat`` over a list of
-messages plus tool definitions). Two implementations are provided:
+The agent loop (:mod:`rtdp.agent.loop`) drives any LangChain chat model. Two are used:
 
-- :class:`OpenAICompatibleClient` — a thin client over the already-present ``httpx`` that talks to
-  any OpenAI-compatible ``/chat/completions`` endpoint (an open dev model or a frontier model,
-  chosen entirely by config). Provider-specific details live here and nowhere else.
-- :class:`FakeLLMClient` — returns scripted responses for deterministic, offline tests (no network,
-  no API key). This is the read-side analogue of the injected ``sleep``/fake sources used elsewhere
-  in the codebase.
-
-No model SDK is used or required.
+- :class:`ProviderExtrasChatOpenAI` (a ``ChatOpenAI`` from ``langchain-openai``), built by
+  :func:`rtdp.agent.runtime.build_llm_client` against any OpenAI-compatible ``/chat/completions``
+  endpoint — an open dev model or a frontier model, chosen entirely by config. Provider-specific
+  details live there and nowhere else.
+- :class:`ScriptedChatModel` — replays scripted ``AIMessage`` turns for deterministic, offline
+  tests (no network, no API key). This is the read-side analogue of the injected ``sleep``/fake
+  sources used elsewhere in the codebase.
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
-from typing import Protocol
+from collections.abc import Callable, Sequence
+from typing import Any
+
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_openai import ChatOpenAI
+from pydantic import Field
+
+_EXTRAS_KEY = "tool_call_extras"  # AIMessage.additional_kwargs key: {tool_call_id: extra_content}
 
 
-@dataclass
-class ToolCall:
-    """One tool/function call requested by the model."""
+class ProviderExtrasChatOpenAI(ChatOpenAI):
+    """``ChatOpenAI`` that hands each tool call's ``extra_content`` back on the next request.
 
-    id: str
-    name: str
-    arguments: dict
+    Some OpenAI-compatible endpoints attach provider data to a tool call and require it on the
+    replayed assistant message. Gemini 3 models return a thought signature at
+    ``tool_calls[N].extra_content.google.thought_signature`` and answer HTTP 400 ("Function call
+    is missing a thought_signature") when a later request omits it; ``ChatOpenAI`` parses the
+    response and drops that field. This subclass keeps it, keyed by tool-call id, and writes it
+    back unchanged. Endpoints that send no ``extra_content`` are unaffected: the payload is
+    byte-identical to ``ChatOpenAI``'s.
 
-
-@dataclass
-class ChatMessage:
-    """A single chat message in OpenAI-compatible shape."""
-
-    role: str  # "system" | "user" | "assistant" | "tool"
-    content: str | None = None
-    tool_calls: list[ToolCall] = field(default_factory=list)
-    tool_call_id: str | None = None  # set on role="tool" messages
-    name: str | None = None  # tool name on role="tool" messages
-
-
-@dataclass
-class ChatResponse:
-    """The model's reply: free text and/or tool calls, plus optional usage stats."""
-
-    content: str | None = None
-    tool_calls: list[ToolCall] = field(default_factory=list)
-    usage: dict | None = None
-
-
-class LLMClient(Protocol):
-    """Minimal chat interface the agent loop depends on."""
-
-    def chat(self, messages: list[ChatMessage], tools: list[dict]) -> ChatResponse: ...
-
-
-def _message_to_wire(msg: ChatMessage) -> dict:
-    """Serialize a :class:`ChatMessage` to the OpenAI request shape."""
-    # OpenAI requires "content" present (may be null on an assistant tool-call turn).
-    wire: dict = {"role": msg.role, "content": msg.content}
-    if msg.tool_calls:
-        wire["tool_calls"] = [
-            {
-                "id": tc.id,
-                "type": "function",
-                "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
-            }
-            for tc in msg.tool_calls
-        ]
-    if msg.tool_call_id is not None:
-        wire["tool_call_id"] = msg.tool_call_id
-    if msg.name is not None:
-        wire["name"] = msg.name
-    return wire
-
-
-def _parse_tool_calls(raw_tool_calls: Iterable[dict] | None) -> list[ToolCall]:
-    """Parse OpenAI tool_calls; bad JSON args degrade to ``{}`` for upstream validation."""
-    calls: list[ToolCall] = []
-    for raw in raw_tool_calls or []:
-        fn = raw.get("function", {})
-        raw_args = fn.get("arguments")
-        if isinstance(raw_args, dict):
-            args = raw_args
-        else:
-            try:
-                args = json.loads(raw_args or "{}")
-            except (json.JSONDecodeError, TypeError):
-                args = {}
-        if not isinstance(args, dict):
-            args = {}
-        calls.append(ToolCall(id=raw.get("id") or "", name=fn.get("name") or "", arguments=args))
-    return calls
-
-
-class OpenAICompatibleClient:
-    """Thin OpenAI-compatible chat client over ``httpx`` (no model SDK)."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        api_key: str | None,
-        model: str,
-        timeout: float = 60.0,
-        temperature: float = 0.0,
-    ) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._api_key = api_key
-        self._model = model
-        self._timeout = timeout
-        self._temperature = temperature
-
-    def chat(self, messages: list[ChatMessage], tools: list[dict]) -> ChatResponse:
-        import httpx  # lazy import (mirrors sources/opensky.py)
-
-        body: dict = {
-            "model": self._model,
-            "messages": [_message_to_wire(m) for m in messages],
-            "temperature": self._temperature,
-        }
-        if tools:
-            body["tools"] = tools
-            body["tool_choice"] = "auto"
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-
-        resp = httpx.post(
-            f"{self._base_url}/chat/completions",
-            json=body,
-            headers=headers,
-            timeout=self._timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        message = (data.get("choices") or [{}])[0].get("message", {}) or {}
-        return ChatResponse(
-            content=message.get("content"),
-            tool_calls=_parse_tool_calls(message.get("tool_calls")),
-            usage=data.get("usage"),
-        )
-
-
-class FakeLLMClient:
-    """Deterministic stub: returns pre-scripted responses in order.
-
-    Pass either a list of :class:`ChatResponse` (consumed one per ``chat`` call) or a callable
-    ``(messages, tools) -> ChatResponse``. Running past the end of a list raises ``IndexError``,
-    surfacing an under-scripted test rather than hanging. Offline — no network or keys.
+    It relies on two private ``ChatOpenAI`` hooks (``_create_chat_result`` and
+    ``_get_request_payload``), pinned by the lockfile and covered by tests. The response shape is
+    documented only in community reports and the replay shape is its mirror image, so a live run
+    is what verifies it.
     """
 
+    def _create_chat_result(self, response, generation_info=None):
+        result = super()._create_chat_result(response, generation_info)
+        raw = response if isinstance(response, dict) else response.model_dump()
+        for generation, choice in zip(result.generations, raw.get("choices") or [], strict=False):
+            calls = (choice.get("message") or {}).get("tool_calls") or []
+            extras = {
+                call["id"]: call["extra_content"]
+                for call in calls
+                if call.get("id") and call.get("extra_content")
+            }
+            if extras and isinstance(generation.message, AIMessage):
+                generation.message.additional_kwargs[_EXTRAS_KEY] = extras
+        return result
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        extras: dict[str, Any] = {}
+        for message in self._convert_input(input_).to_messages():
+            if isinstance(message, AIMessage):
+                extras.update(message.additional_kwargs.get(_EXTRAS_KEY) or {})
+        if extras:
+            for message in payload.get("messages") or []:
+                for call in message.get("tool_calls") or []:
+                    if call.get("id") in extras:
+                        call["extra_content"] = extras[call["id"]]
+        return payload
+
+
+class ScriptedChatModel(GenericFakeChatModel):
+    """Deterministic stub: returns pre-scripted ``AIMessage`` turns in order.
+
+    Pass either a list of messages (consumed one per model call) or a callable
+    ``(messages) -> AIMessage``. Running past the end of a list raises ``IndexError``, surfacing an
+    under-scripted test rather than hanging. ``bind_tools`` is a no-op: the script, not the tool
+    schema, decides which tools are "called". Offline — no network or keys.
+    """
+
+    responder: Callable[[list[BaseMessage]], AIMessage] | None = None
+    calls: list[list[BaseMessage]] = Field(default_factory=list)
+
     def __init__(
         self,
-        responses: list[ChatResponse]
-        | Callable[[list[ChatMessage], list[dict]], ChatResponse],
+        script: Sequence[AIMessage] | Callable[[list[BaseMessage]], AIMessage],
+        **kwargs: Any,
     ) -> None:
-        self._responses = responses
-        self._index = 0
-        self.calls: list[tuple[list[ChatMessage], list[dict]]] = []
+        if callable(script):
+            super().__init__(messages=iter(()), responder=script, **kwargs)
+        else:
+            super().__init__(messages=iter(list(script)), **kwargs)
 
-    def chat(self, messages: list[ChatMessage], tools: list[dict]) -> ChatResponse:
-        self.calls.append((messages, tools))
-        if callable(self._responses):
-            return self._responses(messages, tools)
-        if self._index >= len(self._responses):
-            raise IndexError("FakeLLMClient ran out of scripted responses")
-        resp = self._responses[self._index]
-        self._index += 1
-        return resp
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        self.calls.append(list(messages))
+        if self.responder is not None:
+            return ChatResult(generations=[ChatGeneration(message=self.responder(messages))])
+        try:
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        except StopIteration:
+            raise IndexError("ScriptedChatModel ran out of scripted responses") from None
+
+    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> ScriptedChatModel:
+        return self

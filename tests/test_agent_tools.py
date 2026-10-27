@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from rtdp.agent.tools import (
     DIAGNOSE_TOOL_NAME,
@@ -157,6 +158,48 @@ def test_execute_coerces_argument_types():
     # limit declared integer; passed as a string -> coerced and forwarded as "5".
     result = executor.execute("flights", {"limit": "5"})
     assert result.ok is True
+    assert seen["limit"] == "5"
+
+
+# A real 19-digit snapshot id; as a float it rounds to 7583312095669220352 (a different id).
+_BIG_ID = 7583312095669219978
+
+
+@pytest.mark.parametrize("value", [float(_BIG_ID), float(2**53 + 1)])  # the latter equals 2**53
+def test_execute_rejects_an_id_that_arrived_as_an_inexact_float(value):
+    calls: list = []
+    executor = ApiToolExecutor(
+        "http://test", _client(lambda r: calls.append(r) or httpx.Response(200)), static_registry()
+    )
+    result = executor.execute("flights", {"as_of_snapshot_id": value})
+    assert result.ok is False
+    assert "as_of_snapshot_id" in result.error and "string of digits" in result.error
+    assert calls == []  # never sent: the rounded id would silently query the wrong snapshot
+
+
+@pytest.mark.parametrize("value", [_BIG_ID, str(_BIG_ID)])
+def test_execute_forwards_a_large_id_exactly(value):
+    seen: dict = {}
+
+    def handler(request):
+        seen["id"] = request.url.params.get("as_of_snapshot_id")
+        return httpx.Response(200, json={"snapshot_id": _BIG_ID, "count": 0, "items": []})
+
+    executor = ApiToolExecutor("http://test", _client(handler), static_registry())
+    result = executor.execute("flights", {"as_of_snapshot_id": value})
+    assert result.ok is True
+    assert seen["id"] == str(_BIG_ID)
+
+
+def test_execute_still_accepts_small_whole_floats():
+    seen: dict = {}
+
+    def handler(request):
+        seen["limit"] = request.url.params.get("limit")
+        return httpx.Response(200, json={"snapshot_id": 1, "count": 0, "items": []})
+
+    executor = ApiToolExecutor("http://test", _client(handler), static_registry())
+    assert executor.execute("flights", {"limit": 5.0}).ok is True
     assert seen["limit"] == "5"
 
 

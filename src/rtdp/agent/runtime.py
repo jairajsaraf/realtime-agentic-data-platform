@@ -8,8 +8,9 @@ environment reads here.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from ..config import Settings
-from .llm import LLMClient, OpenAICompatibleClient
 from .loop import AgentResult, run_agent
 from .tools import (
     ApiToolExecutor,
@@ -18,6 +19,14 @@ from .tools import (
     load_openapi,
     static_registry,
 )
+
+if TYPE_CHECKING:
+    from langchain_core.language_models import BaseChatModel
+
+# Sent when no key is configured (e.g. a local endpoint without auth). Passing it explicitly stops
+# the OpenAI client from falling back to OPENAI_API_KEY in the environment, which would otherwise
+# forward that key to whatever endpoint RTDP_AGENT_BASE_URL points at.
+_NO_API_KEY = "not-configured"
 
 
 def build_http_client(settings: Settings):
@@ -36,19 +45,22 @@ def build_registry(settings: Settings, client) -> ToolRegistry:
         return static_registry()
 
 
-def build_llm_client(settings: Settings) -> LLMClient:
-    """Construct the OpenAI-compatible LLM client, or raise a clear error if unconfigured."""
+def build_llm_client(settings: Settings) -> BaseChatModel:
+    """Construct the OpenAI-compatible chat model, or raise a clear error if unconfigured."""
     if not settings.agent_base_url or not settings.agent_model:
         raise RuntimeError(
             "No agent model configured. Set RTDP_AGENT_BASE_URL and RTDP_AGENT_MODEL "
             "(and RTDP_AGENT_API_KEY if the endpoint needs one). See the RUNBOOK Stage D section."
         )
-    return OpenAICompatibleClient(
-        base_url=settings.agent_base_url,
-        api_key=settings.agent_api_key,
+    from .llm import ProviderExtrasChatOpenAI
+
+    return ProviderExtrasChatOpenAI(
         model=settings.agent_model,
-        timeout=settings.agent_timeout_seconds,
+        base_url=settings.agent_base_url,
+        api_key=settings.agent_api_key or _NO_API_KEY,
         temperature=settings.agent_temperature,
+        timeout=settings.agent_timeout_seconds,
+        max_retries=0,  # no silent retries: a quota or transport error surfaces immediately
     )
 
 
@@ -56,7 +68,7 @@ def answer_question(
     settings: Settings,
     question: str,
     *,
-    llm: LLMClient | None = None,
+    llm: BaseChatModel | None = None,
     client=None,
 ) -> AgentResult:
     """Answer one question end-to-end. Injectable ``llm``/``client`` keep this offline-testable."""

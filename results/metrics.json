@@ -1,0 +1,279 @@
+{
+  "generated_utc": "2026-10-27T21:12:38+00:00",
+  "commit_sha": "a021fc3057dffe46b14bde10457cafa354dc5713",
+  "working_tree_dirty": false,
+  "commit_note": "generated at commit_sha and committed afterwards; the sha names the code that was measured, not the commit that holds this file",
+  "machine": {
+    "python": "3.12.10",
+    "os_family": "Windows",
+    "cpu_count": 32
+  },
+  "data": "synthetic only",
+  "steps": {
+    "ruff": {
+      "exit_code": 0,
+      "passed": true,
+      "seconds": 0.127
+    },
+    "pytest": {
+      "command": "pytest -m 'not localstack' (uv --extra agent)",
+      "exit_code": 0,
+      "seconds": 35.771,
+      "tests": 312,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 31,
+      "passed": 281
+    },
+    "synthetic_ingest": {
+      "command": "rtdp ingest --source synthetic --rows 50",
+      "exit_code": 0,
+      "seconds": 1.632,
+      "rows_in_batch": 54,
+      "dq_status": "PASS",
+      "dq_failure_cases": 0,
+      "dq_warning_cases": 3,
+      "rows_written": 54,
+      "snapshot_count": 1
+    },
+    "dq_gate_demo": {
+      "command": "rtdp ingest --source synthetic --inject-failures",
+      "exit_code": 1,
+      "seconds": 1.478,
+      "dq_status": "FAIL",
+      "dq_failure_cases": 3,
+      "rows_written": 0,
+      "aborted": true
+    },
+    "serve_probe": {
+      "command": "rtdp serve (probed over HTTP on a loopback port)",
+      "seconds_to_livez": 1.307,
+      "livez_status": 200,
+      "health_status": 200,
+      "health_ok": true,
+      "snapshots_listed": 1
+    }
+  },
+  "agent_evals": [
+    {
+      "label": "run 1",
+      "file": "agent_eval.json",
+      "status": "completed",
+      "recorded_utc": "2026-10-27T05:17:48+00:00",
+      "model": "gemini-3.5-flash-lite",
+      "commit_sha": "edcbfdd92adc84947a06f85df24b6a2b79592b18",
+      "k": 1,
+      "rescore_matches_stored": true,
+      "endpoint_errors": {
+        "attempts": 10,
+        "of": 12,
+        "http_statuses": {
+          "400": 10
+        }
+      },
+      "addenda": [],
+      "tasks": {
+        "passed": 0,
+        "n": 9,
+        "rate": 0.0,
+        "wilson_95": [
+          0.0,
+          0.2991
+        ]
+      },
+      "decoys": {
+        "passed": 2,
+        "n": 3,
+        "rate": 0.6667,
+        "wilson_95": [
+          0.2077,
+          0.9385
+        ]
+      },
+      "tool_correctness": {
+        "passed": 0,
+        "n": 9,
+        "rate": 0.0,
+        "wilson_95": [
+          0.0,
+          0.2991
+        ]
+      },
+      "citation_present": {
+        "passed": 0,
+        "n": 9,
+        "rate": 0.0,
+        "wilson_95": [
+          0.0,
+          0.2991
+        ]
+      },
+      "latency_s": {
+        "p50": 0.813,
+        "p95": 2.02,
+        "n": 12
+      },
+      "tokens": {
+        "total": 2322,
+        "mean_per_attempt": 1161.0,
+        "attempts_with_usage": 2
+      },
+      "bars": {
+        "decoys_all_pass": false,
+        "tasks_at_least_0_75": false
+      },
+      "note": "recorded run, re-scored offline from its stored transcripts; not re-run"
+    },
+    {
+      "label": "run 2",
+      "file": "agent_eval_run2.json",
+      "status": "aborted",
+      "recorded_utc": "2026-10-27T19:39:41+00:00",
+      "model": "gemini-2.5-flash-lite",
+      "commit_sha": "7655145b9ae77d4ff4a96f8ee0052b4010da4ca6",
+      "k": 1,
+      "rescore_matches_stored": true,
+      "endpoint_errors": {
+        "attempts": 3,
+        "of": 3,
+        "http_statuses": {
+          "404": 3
+        }
+      },
+      "addenda": [
+        "2026-10-27.A1"
+      ],
+      "tasks": {
+        "passed": 0,
+        "n": 3,
+        "rate": 0.0,
+        "wilson_95": [
+          0.0,
+          0.5615
+        ]
+      },
+      "decoys": {
+        "passed": 0,
+        "n": 0,
+        "rate": null,
+        "wilson_95": null
+      },
+      "tool_correctness": {
+        "passed": 0,
+        "n": 3,
+        "rate": 0.0,
+        "wilson_95": [
+          0.0,
+          0.5615
+        ]
+      },
+      "citation_present": {
+        "passed": 0,
+        "n": 3,
+        "rate": 0.0,
+        "wilson_95": [
+          0.0,
+          0.5615
+        ]
+      },
+      "latency_s": {
+        "p50": 0.141,
+        "p95": 0.179,
+        "n": 3
+      },
+      "tokens": {
+        "total": null,
+        "mean_per_attempt": null,
+        "attempts_with_usage": 0
+      },
+      "bars": {
+        "decoys_all_pass": false,
+        "tasks_at_least_0_75": false
+      },
+      "note": "recorded run, re-scored offline from its stored transcripts; not re-run"
+    },
+    {
+      "label": "run 3",
+      "file": "agent_eval_run3.json",
+      "status": "completed",
+      "recorded_utc": "2026-10-27T20:35:10+00:00",
+      "model": "gemini-3.5-flash-lite",
+      "commit_sha": "f79eb85a2c6d3614d2b88b6212c45b07c4eddc44",
+      "k": 1,
+      "rescore_matches_stored": true,
+      "endpoint_errors": {
+        "attempts": 0,
+        "of": 12,
+        "http_statuses": {}
+      },
+      "addenda": [
+        "2026-10-27.A1",
+        "2026-10-27.A2"
+      ],
+      "tasks": {
+        "passed": 6,
+        "n": 9,
+        "rate": 0.6667,
+        "wilson_95": [
+          0.3542,
+          0.8794
+        ]
+      },
+      "decoys": {
+        "passed": 3,
+        "n": 3,
+        "rate": 1.0,
+        "wilson_95": [
+          0.4385,
+          1.0
+        ]
+      },
+      "tool_correctness": {
+        "passed": 7,
+        "n": 9,
+        "rate": 0.7778,
+        "wilson_95": [
+          0.4526,
+          0.9368
+        ]
+      },
+      "citation_present": {
+        "passed": 6,
+        "n": 9,
+        "rate": 0.6667,
+        "wilson_95": [
+          0.3542,
+          0.8794
+        ]
+      },
+      "latency_s": {
+        "p50": 1.79,
+        "p95": 3.317,
+        "n": 12
+      },
+      "tokens": {
+        "total": 52774,
+        "mean_per_attempt": 4397.8,
+        "attempts_with_usage": 12
+      },
+      "bars": {
+        "decoys_all_pass": true,
+        "tasks_at_least_0_75": false
+      },
+      "note": "recorded run, re-scored offline from its stored transcripts; not re-run"
+    }
+  ],
+  "opensky_live": {
+    "status": "recorded",
+    "recorded_utc": "2026-10-26T23:53:41+00:00",
+    "exit_code": 0,
+    "wall_seconds": 3.171,
+    "rows_in_batch": 9167,
+    "rows_written": 9167,
+    "dq_status": "PASS",
+    "dq_failure_cases": 0,
+    "dq_warning_cases": 2,
+    "note": "recorded run 2026-10-26, not re-run"
+  },
+  "problems": []
+}

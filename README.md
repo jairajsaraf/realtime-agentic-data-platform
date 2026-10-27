@@ -2,629 +2,250 @@
 
 [![codecov](https://codecov.io/github/jairajsaraf/realtime-agentic-data-platform/graph/badge.svg?token=PX1S7LTMYW)](https://codecov.io/github/jairajsaraf/realtime-agentic-data-platform)
 
-> **🟢 Live demo — [demo.agentic-data-platform.me](https://demo.agentic-data-platform.me)**
-> The read-only serving API runs live over automatic HTTPS on a single-host deployment, serving
-> **synthetic** flight data. Explore the interactive OpenAPI docs at
-> [`/docs`](https://demo.agentic-data-platform.me/docs) or check
-> [`/health`](https://demo.agentic-data-platform.me/health).
+A data platform built stage by stage and runnable from a fresh clone. It writes flight state vectors
+into an [Apache Iceberg](https://iceberg.apache.org/) table on a real catalog, serves them through a
+read-only FastAPI/DuckDB API with snapshot time travel, and lets a natural-language agent answer
+questions and diagnose data quality by calling that API as its tools.
 
-A locally reproducible data platform built **stage by stage**, now running as a live single-host
-demo. It pairs an [Apache Iceberg](https://iceberg.apache.org/) lakehouse (**Stage 1**) with a
-read-only FastAPI/DuckDB serving layer (**Stage 2A**), scheduled near-real-time micro-batch
-ingestion (**Stage 2B**), and a natural-language **agent** that answers questions and diagnoses
-data quality by calling that read API as its tools (**Stage D**). **Stage E** productionizes the
-whole thing: one multi-entrypoint container image, a single-host go-live behind **Caddy** automatic
-HTTPS, an optional **OpenTelemetry → Datadog** observability boundary (off by default locally), and
-a CI/CD path of **docker-smoke → GHCR publish → gated SSH deploy**.
+"Real-time" and "agentic" name the direction, and the backing is deliberately narrow:
 
-> "Real-time" and "agentic" name the platform's **direction** — the words now have honest, narrow
-> backing, not their maximal meaning. "Real-time" is **scheduled micro-batch** ingestion into a
-> real Iceberg table (near-real-time, **not** true Kafka/Flink streaming). "Agentic" is a
-> **read-only, human-in-the-loop** agent over the typed HTTP API — it proposes remediations but
-> never mutates data, and there is no autonomous action, RAG, or fine-tuning. True streaming,
-> RAG/vector search, and product-facing analytics dashboards remain **not built yet** (the E6.3
-> Datadog *observability* dashboard is live; see [Out of scope & roadmap](#out-of-scope--roadmap)).
+- Ingestion is near-real-time micro-batch ingestion, not true streaming. There is no Kafka or Flink.
+- The agent is strictly read-only and human-in-the-loop — proposes remediations, never mutates.
+  There is no autonomous action, RAG, or fine-tuning.
+- Everything tested in CI runs on synthetic data only. The one real-data artifact is a counts-only
+  record of a single OpenSky ingest. Real OpenSky data stays
+  opt-in, network-gated, never run in CI, never committed.
 
-## Project status
+## Results
 
-| Stage | Status | What it adds |
-| --- | --- | --- |
-| **Stage 1 — Iceberg lakehouse** | ✅ Complete | A real catalog-backed Iceberg table with schema evolution, partition evolution, snapshot/time-travel, and ingestion-time data-quality checks — not a generic CSV-to-Parquet job. |
-| **Stage 2A — read-only serving layer** | ✅ Complete | A FastAPI service over the bronze table: typed flight reads, geographic bounding-box, interval aggregations, and Iceberg time-travel, behind an auto-generated OpenAPI schema. |
-| **Stage 2B — incremental micro-batch ingestion** | ✅ Complete | A scheduled `rtdp stream` loop that polls a source and appends micro-batches via the existing writer (within-batch dedup, skip-empty, read-time latest-state view, opt-in snapshot expiration). Near-real-time micro-batch — **not** true streaming. |
-| **Stage D — agentic layer** | ✅ Complete | A natural-language agent (`rtdp agent`) that answers flight questions and diagnoses data quality by calling the Stage 2A HTTP API as tools. Strictly read-only and human-in-the-loop — proposes remediations, never mutates. Deterministic fake-LLM tests; opt-in live eval harness. |
-| **Stage E — productionization & observability** | ✅ Complete | One Docker image (multi-entrypoint: serve/stream/maintain/agent) deployed live to a single host: **Caddy** fronts the read-only API with automatic Let's Encrypt HTTPS, `stream` appends synthetic micro-batches, and an optional **OpenTelemetry → Datadog** boundary (`[otel]` extra, no-op by default locally) reports traces and a `/health` service check. CI/CD smoke-tests the image, publishes it to GHCR on `main`, and runs a **real, gated** SSH deploy (protected `production` environment). **Ops-only and additive** — no new data features or endpoints (no `/metrics`); the public demo serves **synthetic data only**. |
-| **Add-on — MCP server** (post-E6) | ✅ Complete | An optional, read-only [MCP](https://modelcontextprotocol.io) server (`rtdp mcp`, `[mcp]` extra, stdio) exposing the six Stage 2A read endpoints as typed MCP tools for any MCP client. Another HTTP client of the API, exactly like the Stage D agent — no new endpoints, no write surface. |
-| **Later stages** | ⬜ Planned | True streaming (Kafka/Flink), RAG/vector search, fine-tuning, orchestration, product/analytics dashboards (beyond the live Datadog observability dashboard), real-AWS / multi-host (Kubernetes) deployment. |
+Every number below is generated by [`scripts/reproduce.py`](scripts/reproduce.py) into
+`results/metrics.json` and rendered here by `make render-results`. Nothing in this README outside
+this block is a measurement. Recorded runs (the agent eval, the one OpenSky ingest) are read from
+their result files and labelled as recorded, not re-run.
+
+<!-- results:start -->
+| Check | Result |
+| --- | --- |
+| Unit tests | 281 passed, 31 skipped, 0 failed (35.771 s) |
+| Lint | ruff clean |
+| Synthetic ingest | 54 rows written in 1.632 s; DQ PASS, 0 failure and 3 warning cases |
+| DQ gate demo | batch with injected failures: exit code 1, 0 rows written, snapshot count unchanged |
+| Read API | /livez 200 after 1.307 s, /health 200, 1 snapshot(s) |
+| Agent eval, run 1 | gemini-3.5-flash-lite, 2026-10-27, k=1, status completed: tasks 0/9 (Wilson 95% CI 0.00 to 0.30), decoys 2/3 (Wilson 95% CI 0.21 to 0.94); 10 of 12 attempts ended in a model-endpoint error (HTTP 400 x10) and count as failures (recorded, re-scored offline) |
+| Agent eval, run 2 | gemini-2.5-flash-lite, 2026-10-27, k=1, status aborted: tasks 0/3 (Wilson 95% CI 0.00 to 0.56), decoys n/a; 3 of 3 attempts ended in a model-endpoint error (HTTP 404 x3) and count as failures (recorded, re-scored offline) |
+| Agent eval, run 3 | gemini-3.5-flash-lite, 2026-10-27, k=1, status completed: tasks 6/9 (Wilson 95% CI 0.35 to 0.88), decoys 3/3 (Wilson 95% CI 0.44 to 1.00) (recorded, re-scored offline) |
+| OpenSky live ingest | 9167 rows written in 3.171 s; DQ PASS, 0 failure and 2 warning cases (recorded run 2026-10-26, not re-run; opt-in, network-gated, never run in CI, never committed) |
+
+Generated by `scripts/reproduce.py` at commit `a021fc3` on Windows, Python 3.12.10, 32 CPUs (2026-10-27). Synthetic data only; timings come from one machine and vary.
+<!-- results:end -->
+
+Read the agent eval rows with their error notes. An attempt that ends in a model-endpoint error
+counts as a failure, so a low pass rate with endpoint errors says the run did not measure the agent.
+The preregistration, its addenda, and the per-case transcripts are in
+[`scripts/agent_eval_scoring.py`](scripts/agent_eval_scoring.py) and `results/agent_eval*.json`.
 
 ## Architecture
 
-```
-INGESTION (Stage 1 batch / Stage 2B micro-batch CLI)   SERVING (Stage 2A HTTP)   AGENT (Stage D)
-
-  source ── synthetic  (default, deterministic, CI)
-  (rtdp.    live OpenSky (opt-in, network-gated, never committed)
-   sources)
-     │
-     ▼
-  transform               (rtdp.transforms)
-     │
-     ▼
-  data quality            (Pandera — WARN continues, FAIL aborts the write)
-     │
-     ▼
-  Iceberg table           bronze.opensky_state_vectors          ┐
-  catalog: SqlCatalog     storage: LocalStack S3 (primary)      │  read
-  on SQLite                        file:// (no-Docker fallback)  │
-     │                                                           ▼
-     └───────────────────────────────►  query layer  ─────►  FastAPI  ─────►  client / CLI
-                                         (rtdp.query)         (rtdp.api)          ▲
-                                         pyiceberg pushdown   typed JSON,         │ HTTP tool calls
-                                         + DuckDB SQL         OpenAPI /docs        │
-                                                                         Stage D agent (rtdp.agent)
-                                                                         NL question → tools → answer
+```mermaid
+flowchart LR
+  subgraph ingest["Ingestion (CLI)"]
+    SRC["source<br/>synthetic by default<br/>OpenSky live is opt-in"] --> TR[transform] --> DQ["data quality<br/>WARN continues, FAIL aborts"] --> APP[append]
+  end
+  APP --> ICE[("Iceberg table<br/>SqlCatalog on SQLite<br/>S3 via LocalStack, or file://")]
+  ICE --> QRY["query layer<br/>pyiceberg pushdown + DuckDB"] --> API["read API<br/>FastAPI, OpenAPI docs"]
+  API -- HTTP --> AGT["agent<br/>LangChain, optional extra"]
+  API -- HTTP --> MCP["MCP server<br/>optional extra"]
+  API -- in-process --> SPC["Hugging Face Space demo<br/>synthetic data only"]
+  AGT --> LLM["any OpenAI-compatible model<br/>external, config only"]
 ```
 
-**Dependency direction (one-way):** `agent → API → query → (catalog, config, schema)`. All read
-logic lives in `rtdp.query` (transport-agnostic); the FastAPI layer (`rtdp.api`) is a thin
-transport over it. The **Stage D agent (`rtdp.agent`) is just another HTTP client of the API** —
-it never imports `rtdp.query` or touches the catalog/DuckDB directly. Ingestion never depends on
-the API, and neither the API nor the agent mutates the table.
-
-## Prerequisites
-
-- **Python 3.12** and **[uv](https://docs.astral.sh/uv/)**.
-- **Docker Desktop** — only for the default LocalStack S3 path. The `file://` fallback runs
-  everything (ingestion, demos, API, tests) without Docker.
-
-Java/JVM is **not** required — pyiceberg is pure-Python.
+Dependencies point one way: `agent -> API -> query -> catalog`. All read logic lives in
+`rtdp.query`, and `rtdp.api` is a thin transport over it. The agent and the MCP server are plain
+HTTP clients of the API. They never import the query layer, the catalog, or DuckDB, and AST tests
+enforce that. Ingestion never depends on the API, and neither the API nor the agent mutates the
+table. CI and `/health` depend on no model provider, Datadog, Doppler, MinIO, Hugging Face, or the
+internet.
 
 ## Quick start
 
-End-to-end, copy-pasteable:
+Requires Python 3.12 and [uv](https://docs.astral.sh/uv/). Install uv with the official installer:
 
 ```bash
-# 1. Install dependencies (creates .venv from uv.lock)
-uv sync
-
-# 2. Choose an object-store backend:
-#    a) LocalStack S3 (primary) — needs Docker:
-docker compose up -d
-#    b) ...or no Docker — use a local file warehouse instead:
-#       bash:        export RTDP_STORAGE_BACKEND=file
-#       PowerShell:  $env:RTDP_STORAGE_BACKEND="file"
-
-# 3. Verify the resolved configuration
-uv run rtdp info
-
-# 4. Ingest deterministic synthetic data (each batch is a new Iceberg snapshot)
-uv run rtdp ingest --source synthetic --rows 50
-
-# 5. Start the read-only API, then open the interactive docs
-uv run rtdp serve            # http://127.0.0.1:8000  (OpenAPI UI at /docs)
-
-# 6. Run the tests (from a second shell)
-uv run pytest -m "not localstack"   # unit/integration on file:// (no Docker)
-uv run pytest -m localstack         # S3 path (LocalStack must be running)
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Copy `.env.example` to `.env` to customize the bucket, endpoint, warehouse, or catalog path.
-Real AWS S3 is a config-only swap: `RTDP_STORAGE_BACKEND=aws` plus real credentials/region.
+Then, from a clone of this repository:
 
----
+```bash
+uv sync --frozen                                  # exact versions from uv.lock
+export RTDP_STORAGE_BACKEND=file                  # PowerShell: $env:RTDP_STORAGE_BACKEND="file"
+uv run rtdp ingest --source synthetic --rows 50   # each batch is a new Iceberg snapshot
+uv run rtdp serve                                 # http://127.0.0.1:8000, docs at /docs
+uv run pytest -m "not localstack"
+```
 
-## Stage 1 — Iceberg lakehouse
+The default storage backend is LocalStack S3 (`docker compose up -d`). The `file://` backend above
+is a dev/CI convenience only — not the target architecture. Real AWS S3 is a config-only swap
+(`RTDP_STORAGE_BACKEND=aws` plus credentials). Use `uv sync --frozen`: an unlocked install can
+resolve a newer pyiceberg than the one this repository was built and tested with (see
+[Limitations](#limitations)).
 
-### Engine & catalog decision
+Optional extras, none installed by default:
 
-| Choice | What | Why |
+| Extra | Command | What it adds |
 | --- | --- | --- |
-| **Engine** | pyiceberg (writer) + DuckDB (read/SQL) | Pure-Python, no JVM — reproducible from a fresh clone on Windows/Linux, light CI. Supports every required Stage-1 demo. |
-| **Catalog** | pyiceberg `SqlCatalog` on SQLite | A *real* catalog (atomic compare-and-swap on a metadata pointer), zero extra runtime. Config-swap path to Postgres / a REST catalog later. |
-| **Storage** | **LocalStack S3 (primary)**; `file://` is a dev/CI convenience only | Free local S3 emulation; real AWS is a config-only swap. `file://` runs the demos without Docker but is **not** the target architecture. |
-| **DQ** | Pandera (warn/fail) | Lightweight, schema-first validation. |
-
-The main alternative considered was **PySpark + Iceberg**: more feature-complete, but it needs
-a JVM + winutils on Windows and heavy CI, which conflicts with the fresh-clone-reproducibility
-and lightweight-CI constraints. The only pyiceberg gap (data-file compaction) is out of
-Stage-1 scope.
-
-### Dataset
-
-OpenSky Network flight **state vectors**.
-
-- **Real public-dataset path:** the live OpenSky REST API, wired as an on-demand source
-  (`rtdp ingest --source opensky-live`). It is **opt-in and network-gated**, is **never run in
-  CI**, and its output is **never committed** (OpenSky's license forbids redistribution). This
-  is the genuine real-data path and preserves the later live-state-vector direction.
-- **Synthetic source (default):** a deterministic OpenSky-shaped generator used **only** for
-  reproducible local/CI verification — it is not real data. It is seeded, spans multiple event
-  days, and can inject bad rows to exercise the DQ severities.
-
-Why not commit real OpenSky data: its license is non-commercial/research-only and
-non-transferable, and it offers no free historical backfill — so the committed and CI-tested
-path is synthetic, while real ingestion runs locally via the live source.
-
-### Table design
-
-`bronze.opensky_state_vectors` — one row per aircraft state observation.
-
-- **Identity:** `icao24` (stable, required), `callsign`, `origin_country`.
-- **Event vs ingestion time:** `event_time` (timestamptz observation time),
-  `time_position`/`last_contact` (raw epoch), `ingest_time` (write time), `ingest_batch_id`,
-  `source_name`.
-- **Geospatial:** `latitude`, `longitude`, `baro_altitude`, `geo_altitude`.
-- **Kinematics:** `velocity`, `true_track`, `vertical_rate`, `on_ground`, `squawk`, `spi`,
-  `position_source`, `category`.
-
-**Partition strategy:** start coarse with a hidden `day(event_time)` transform (queries filter
-raw `event_time`; Iceberg prunes partitions). Day granularity avoids tiny files for sparse
-backfill and supports future continuous appends without a rewrite. The partition-evolution demo
-adds `hour(event_time)` for future writes only. See `src/rtdp/schema.py`.
-
-### Ingestion
-
-One clean path: **source → transform → data-quality checks → append** to the catalog-backed
-bronze table. Each successful batch is a new Iceberg snapshot; a FAIL-level DQ result aborts the
-write (nothing committed) and exits non-zero.
-
-```bash
-# Synthetic (reproducible) into LocalStack S3 — the primary path (needs Docker):
-docker compose up -d
-uv run rtdp ingest --source synthetic --rows 50
-
-# No Docker? Use the file:// convenience backend (NOT the target architecture):
-#   PowerShell:  $env:RTDP_STORAGE_BACKEND="file"
-#   bash:        export RTDP_STORAGE_BACKEND=file
-uv run rtdp ingest --source synthetic --rows 50
-
-# Real public data (opt-in, network-gated, never committed):
-uv run rtdp ingest --source opensky-live
-
-# Demonstrate DQ FAIL handling (injects bad rows; aborts, exits non-zero):
-uv run rtdp ingest --inject-failures
-
-# Inspect table state (snapshots, partition spec, sample rows):
-uv run python scripts/inspect_table.py
-```
-
-Example output (synthetic):
-
-```
-Data quality: PASS (54 rows, 0 failures, 3 warnings)
-WARN checks:
-         column                                         check  failure_case index
-           None duplicate (icao24, last_contact) rows present           0.0  None
-       velocity                         in_range(0.0, 1500.0)        2200.0    50
-position_source                            isin([0, 1, 2, 3])           9.0    51
-Wrote 54 rows to bronze.opensky_state_vectors
-  snapshot_id    : 4100877081503986423
-  snapshot_count : 1
-```
-
-#### Data-quality severities
-
-| Severity | Behavior | Example checks |
-|---|---|---|
-| **FAIL** | Aborts the ingest; nothing written; non-zero exit | null `icao24`; `latitude` ∉ [-90, 90]; `longitude` ∉ [-180, 180]; null `event_time`/`last_contact` |
-| **WARN** | Reported; ingest continues | `velocity` ∉ [0, 1500]; unknown `position_source`; duplicate `(icao24, last_contact)` |
-
-#### How writes work
-
-| Aspect | Value |
-|---|---|
-| Catalog | `SqlCatalog` (type `sql`) on SQLite |
-| Warehouse (LocalStack/AWS — primary) | `s3://<bucket>/<prefix>` (default `s3://lakehouse/warehouse`) |
-| Warehouse (`file://` convenience) | `file://<abs>/_warehouse` |
-| Table | `bronze.opensky_state_vectors`, partitioned `day(event_time)` |
-| Append API | pyiceberg `table.append(pa.Table)`; the Arrow schema is derived from the Iceberg schema so required/optional and `timestamp(us, UTC)` always match |
-
-### Iceberg capability demos
-
-Runnable demonstrations of the four Iceberg capabilities. Each runs against the configured
-backend (default LocalStack S3) and uses a **dedicated `demo.opensky_state_vectors` table** that
-it resets first (purge + deterministic synthetic seed), so results are reproducible and the real
-`bronze` table is never touched.
-
-```bash
-uv run rtdp demo catalog              # catalog discovery / table loading
-uv run rtdp demo schema-evolution     # add a nullable column; compare old vs new snapshot
-uv run rtdp demo partition-evolution  # day(event_time) -> hour(event_time), no data rewrite
-uv run rtdp demo time-travel          # read by snapshot id; resolve a snapshot by timestamp
-uv run rtdp demo all                  # run all four in sequence
-uv run rtdp demo reset                # purge ONLY the demo table
-```
-
-- **catalog** — lists namespaces/tables and loads the table from the catalog (proves a real
-  catalog, not files pretending to be tables).
-- **schema-evolution** — `update_schema().add_column(...)` adds a nullable column; the pre-add
-  snapshot has no values for it, the post-add batch does.
-- **partition-evolution** — evolves the spec for *future* writes, replacing `day(event_time)`
-  with `hour(event_time)` (pyiceberg disallows two partition fields on one source column, so this
-  is a replace, not a stack). Pre-existing data files keep `spec_id=0` and are **not rewritten**;
-  new appends use `spec_id=1`, proven via `table.inspect.data_files()` (file_path + spec_id).
-- **time-travel** — `table.scan(snapshot_id=...)` reads an older snapshot; `snapshot_as_of_timestamp`
-  resolves a snapshot by time. The explicit snapshot id is the primary, deterministic proof.
-
-Covered by `tests/test_demos.py` (`file://`) and `tests/test_demos_localstack.py` (LocalStack S3).
-
----
-
-## Stage 2A — read-only serving layer
-
-A FastAPI service exposes typed, queryable reads over the bronze table — flight filters,
-geographic bounding-box, interval aggregations, and Iceberg snapshot/time-travel — behind an
-auto-generated OpenAPI schema. It is **read-only**: ingestion stays the Stage 1 CLI path, and no
-endpoint mutates the table. All read logic lives in `rtdp.query` (transport-agnostic); the API
-(`rtdp.api`) is a thin layer over it, so the CLI and a future Stage D agent can reuse the same
-functions.
-
-**Why predicate pushdown?** `icao24`/`callsign`/time-window filters are translated into a
-pyiceberg `row_filter` and pushed into the scan, so the `day(event_time)` partition pruning fires
-at the table-format level instead of materializing the whole table and filtering in DuckDB.
-DuckDB is reserved for the SQL-shaped work (bounding-box, `GROUP BY` aggregations, ordered
-`LIMIT`/`OFFSET` paging). See the note in `src/rtdp/query.py`.
-
-### Run it
-
-```bash
-uv sync                                            # installs fastapi + uvicorn (in uv.lock)
-docker compose up -d                               # LocalStack S3 (primary)
-#   ...or skip Docker:  export RTDP_STORAGE_BACKEND=file  (PowerShell: $env:...="file")
-uv run rtdp ingest --source synthetic --rows 50    # seed some data first (API is read-only)
-uv run rtdp serve                                  # http://127.0.0.1:8000
-```
-
-Override the bind address with `RTDP_API_HOST` / `RTDP_API_PORT`. Interactive OpenAPI docs render
-at **http://127.0.0.1:8000/docs**.
-
-### Endpoints
-
-| Method & path | Purpose |
-|---|---|
-| `GET /health` | catalog/table reachability (200 healthy, 503 unavailable) |
-| `GET /flights` | filter by `icao24`, `callsign`, `start`, `end`; `limit`/`offset` |
-| `GET /flights/bbox` | bounding-box (`min_lat,max_lat,min_lon,max_lon`) + optional time window |
-| `GET /stats/flights-per-interval` | counts per `hour`\|`day`, optional `group_by=origin_country` |
-| `GET /snapshots` | list Iceberg snapshots from table metadata |
-| `GET /meta` | table identifier, snapshot pointer/count, schema, partition spec |
-
-Every read/aggregation endpoint accepts mutually-exclusive time-travel selectors
-`as_of_snapshot_id` and `as_of_timestamp` (supplying both → HTTP 400; a timestamp before the
-first snapshot → 404) and echoes the resolved `snapshot_id`.
-
-In `/flights` and `/flights/bbox`, **`count` is the number of items _returned_ (after
-`limit`/`offset`), not the total number of matching rows** — paging avoids a second full-scan
-count.
-
-### curl examples
-
-```bash
-curl 'http://127.0.0.1:8000/health'
-curl 'http://127.0.0.1:8000/flights?callsign=DLH123&limit=5'
-curl 'http://127.0.0.1:8000/flights?start=2026-06-14T00:00:00Z&end=2026-06-15T00:00:00Z&limit=5'
-curl 'http://127.0.0.1:8000/flights/bbox?min_lat=45&max_lat=55&min_lon=5&max_lon=15&limit=10'
-curl 'http://127.0.0.1:8000/stats/flights-per-interval?interval=day&group_by=origin_country'
-curl 'http://127.0.0.1:8000/snapshots'
-curl 'http://127.0.0.1:8000/meta'
-# time-travel: read an older snapshot (id from /snapshots)
-curl 'http://127.0.0.1:8000/flights?as_of_snapshot_id=<snapshot-id>&limit=5'
-```
-
-**Limitations (local-first):** no auth, rate-limiting, or caching yet, and no write path through
-the API. The Stage D agent consumes this API as its tool surface (see below).
-
----
-
-## Stage 2B — incremental micro-batch ingestion
-
-`rtdp stream` turns the one-shot batch ingest into a **scheduled micro-batch loop**: it polls a
-source on a timer and appends one micro-batch per interval, **reusing the unchanged Stage 1
-`run_ingest` writer**. This is **near-real-time micro-batch ingestion, not true streaming** —
-Kafka/Flink-style streaming remains out of scope.
-
-Each tick fetches one batch, **de-duplicates within the batch** on the logical key
-`(icao24, last_contact)`, **skips empty polls** (so an empty OpenSky response never mints an empty
-snapshot), and appends via `run_ingest`. The loop backs off on transient source errors (e.g.
-OpenSky rate limits) and stops cleanly on Ctrl+C. Bronze stays an **append-only event log**;
-"latest state per aircraft" is a **read-time** concern, exposed as `rtdp.query.query_latest_state`
-(a DuckDB `ROW_NUMBER()` window over bronze — a thin silver-style read model, no row updates, no
-MERGE).
-
-### Run it
-
-```bash
-docker compose up -d                                  # LocalStack S3 (or export RTDP_STORAGE_BACKEND=file)
-uv run rtdp stream --source synthetic --interval 5 --max-batches 10
-#   live data (opt-in, network-gated, NEVER in CI — see the OpenSky note above):
-#   uv run rtdp stream --source opensky-live --interval 60
-```
-
-`--max-batches 0` (the default) runs until interrupted. Tune the cadence with `--interval` or
-`RTDP_STREAM_INTERVAL_SECONDS`. The synthetic path uses a deterministic *continuous* generator
-that advances event-time across batches, so CI exercises the loop with no Docker/network.
-
-### Snapshot maintenance (metadata-only)
-
-Micro-batch appends accumulate snapshots (and small data files). Bound snapshot/metadata growth
-with an explicit, opt-in maintenance command:
-
-```bash
-uv run rtdp maintain expire-snapshots --retain 10     # keep the newest 10 snapshots
-```
-
-This expires old snapshots from the **table metadata only** — it does **not** delete data files
-and is **not compaction**. Data-file compaction/rewrite is a true-engine (e.g. Spark) capability,
-intentionally **not faked** here; it ties back to the Stage 1 pyiceberg/no-JVM trade-off
-(small-file accumulation is a known limitation of this pure-Python build). The current snapshot is
-never expired.
-
----
-
-## Stage D — agentic layer over the read API
-
-`rtdp agent` is a natural-language agent that answers questions about the flight data and
-diagnoses data quality **by calling the Stage 2A HTTP API as its tools**. It is strictly an API
-client: it never imports `rtdp.query` or reaches into the catalog/DuckDB, and it is **read-only
-and human-in-the-loop** — it can *propose* remediations but never mutates tables, data, schemas,
-or files, and adds no write surface (`agent → API → query → catalog`).
-
-- **Tools from OpenAPI.** Tool definitions are derived from the live `/openapi.json` (a curated
-  read-only allowlist of the GET endpoints), with a static fallback. There is deliberately **no
-  write tool**, so the agent is structurally incapable of changing anything.
-- **Grounded answers.** Every answer cites which endpoint and which Iceberg snapshot id produced
-  it; provenance is taken from the tool results themselves, not from the model's prose.
-- **DQ diagnosis (read-derived).** Pandera WARN/FAIL history is not persisted and there is no DQ
-  endpoint, so the agent **re-derives** anomalies (over-speed, unknown `position_source`,
-  out-of-range coordinates/altitude, null required fields, duplicate state keys) from the rows the
-  API returns and proposes fixes for a human to apply. This is a **bounded sample** — one queried
-  window, capped by the API row limit, over the snapshots queried — and the agent says so.
-- **Config-driven LLM.** The model sits behind a thin OpenAI-compatible client (built on the
-  existing `httpx`; no model SDK). Endpoint, key, and model name come from `RTDP_AGENT_*` settings,
-  so an open dev model (e.g. an NVIDIA NIM endpoint) and a frontier model are a config swap — no
-  keys are committed.
-
-### Run it
-
-```bash
-# 1. Seed data and start the read-only API (the agent talks to it over HTTP):
-uv run rtdp ingest --source synthetic --rows 80
-uv run rtdp serve                                   # http://127.0.0.1:8000
-
-# 2. Configure an OpenAI-compatible model endpoint (example: NVIDIA NIM):
-#   PowerShell:  $env:RTDP_AGENT_BASE_URL="https://integrate.api.nvidia.com/v1"
-#                $env:RTDP_AGENT_MODEL="meta/llama-3.1-8b-instruct"
-#                $env:RTDP_AGENT_API_KEY="<your key>"
-
-# 3. Ask (one-shot), or run interactively:
-uv run rtdp agent "How many records are there, and which snapshot answered?"
-uv run rtdp agent --interactive
-```
-
-Swap to a frontier provider by pointing `RTDP_AGENT_BASE_URL` / `RTDP_AGENT_MODEL` at any other
-OpenAI-compatible endpoint — no code change. **Testing split:** unit tests drive the agent with a
-deterministic **fake LLM** (no network, no keys; runs in CI), while a separate **opt-in** live
-eval harness (`scripts/eval_agent.py`, network-gated, never in CI) reports grounding/faithfulness,
-tool-call correctness, latency, and token usage against a real model. See `RUNBOOK.md`.
-
----
-
-## Stage E — productionization & observability
-
-Stage E packages the existing surfaces for an always-on, monitored **single-host** demo. It is
-**ops-only and additive**: no data-plane, schema, writer, DQ, or query change, and **no new API
-endpoint** (in particular **no `/metrics`**, `/agent`, `/flights/latest`, or `/dq/*`). The deployed
-demo serves **synthetic data only** — never live OpenSky.
-
-### One image, multiple entrypoints
-
-A single Docker image (`Dockerfile`) wraps the `rtdp` CLI; the container command selects the runtime:
-
-| Command | Role |
-|---|---|
-| `rtdp serve` | read-only API (the only externally exposed service) |
-| `rtdp stream` | the sole writer — one micro-batch snapshot per interval (synthetic source) |
-| `rtdp maintain expire-snapshots` | one-shot, metadata-only snapshot expiration |
-| `rtdp agent "<q>"` | on-demand agent question (external, config-driven LLM) |
-
-```bash
-docker build -t rtdp:local .
-bash scripts/docker_smoke.sh           # build → seed (file://) → serve → GET /health == 200
-```
-
-### Single-host topology (Docker Compose)
-
-`deploy/docker-compose.yml` runs `api` + `stream` (and a one-shot `maintain` profile) from the one
-image, sharing a single volume. The catalog stays **local SQLite on that shared volume in every
-backend**, so the host is **single-writer** — run one `stream` replica and schedule `maintain` not
-to overlap it.
-
-```bash
-docker compose -f deploy/docker-compose.yml up -d --build                   # file:// (no secrets)
-docker compose -f deploy/docker-compose.yml --profile s3 up -d              # self-hosted MinIO
-docker compose -f deploy/docker-compose.yml --profile edge up -d            # + Caddy TLS edge
-docker compose -f deploy/docker-compose.yml --profile observability up -d   # + Datadog Agent (needs DD_API_KEY)
-```
-
-Object storage is config-driven: set `RTDP_STORAGE_BACKEND=aws` and point `RTDP_S3_ENDPOINT_URL`
-at the MinIO service to use an S3-compatible store (real AWS stays the default when no endpoint is
-set — see `deploy/README.md`). The MinIO console binds to `127.0.0.1` only.
-
-### Edge, TLS & single-host go-live
-
-On the public host the `edge` profile runs **Caddy**, which terminates TLS with an automatically
-provisioned/renewed **Let's Encrypt** certificate and reverse-proxies the public hostname
-(`RTDP_PUBLIC_HOSTNAME`) to the internal `api:8000`. The API's own port is bound to `127.0.0.1`
-(`RTDP_API_BIND`), so only Caddy is internet-facing and UFW allows just `22/80/443`. This is what
-backs the **live demo at [demo.agentic-data-platform.me](https://demo.agentic-data-platform.me)** —
-synthetic data only.
-
-### Telemetry boundary (no-op by default)
-
-`rtdp.telemetry` is the single observability seam: **stdlib structured logging** always, and
-**OpenTelemetry tracing only when `RTDP_OTEL_ENABLED=true` AND the optional `[otel]` extra is
-installed**. The default install pulls in **no** OpenTelemetry packages, so CI and the default
-runtime stay dependency-free; if the extra is missing while enabled, the boundary logs a warning
-and degrades to no-op (the app always boots). Nothing is exported until spans are produced.
-
-```bash
-uv sync --extra otel       # opt in to the OpenTelemetry SDK + OTLP exporter
-```
-
-Settings (all under the existing `RTDP_*` / `Settings` surface): `RTDP_OTEL_ENABLED`,
-`RTDP_OTEL_SERVICE_NAME`, `RTDP_OTEL_EXPORTER_OTLP_ENDPOINT` (provider-agnostic — point it at a
-collector or the Datadog Agent), `RTDP_LOG_FORMAT` (`text`|`json`), `RTDP_LOG_LEVEL`. There is **no
-`/metrics` scrape endpoint**.
-
-Two custom spans are emitted through this boundary (and, like everything above, only when
-`RTDP_OTEL_ENABLED=true` **and** the `[otel]` extra are active — otherwise the wrapping is a
-dependency-free no-op):
-
-- **`rtdp.ingest.batch`** wraps each micro-batch append in `run_ingest` (so it covers both `rtdp
-  ingest` and `rtdp stream`), with attributes `rows_in`, `rows_written`, and `ingest.lag_seconds`
-  (ingest wall-clock minus the newest `last_contact` in the batch — data staleness at write time).
-  A DQ-FAIL batch writes nothing and emits no span.
-- **`rtdp.agent.tool_call`** wraps every `ApiToolExecutor.execute` call, with attributes `name`
-  (the tool), `http.status_code`, `ok`, and `error`; the span duration is the tool-call latency.
-
-Both stay off by default and, when enabled, export over OTLP to **Datadog APM** (traces under
-`service:rtdp`). They add no new dependency, setting, endpoint, or metric.
-
-On the deployed host the `observability` profile runs a **Datadog Agent** that receives traces over
-**OTLP gRPC on `4317` (internal to the compose network only — never published)** and runs an HTTP
-check against the API's internal `/health`. Traces land under `service:rtdp`, and the dashboard plus
-the `/health` service check are validated live (Datadog US5) — see `deploy/observability/README.md`.
-Export stays fully optional: **`/health` and CI never depend on Datadog**, and there is still no
-`/metrics` endpoint.
-
-### CI/CD
-
-`.github/workflows/ci.yml` keeps image validation, publishing, and deployment separate and
-least-privilege (top-level `permissions: contents: read`):
-
-- **`docker-smoke`** (every push + PR) — builds the image and asserts `/health == 200` on the
-  file:// synthetic backend, plus `docker compose config` validation. **No secrets, no GHCR
-  login/push** — pull-request validation needs no cloud credentials.
-- **`telemetry-otel`** (every push + PR) — runs the telemetry suite under the `[otel]` extra and
-  uploads coverage so the OTel-enabled branches are measured. Key-free.
-- **`publish-image`** (push to `main` only) — builds and pushes `ghcr.io/<owner>/<repo>:<sha>` and
-  `:latest` using the built-in `GITHUB_TOKEN` (`packages: write`). No external secret.
-- **`deploy`** (push to `main` only; `environment: production`) — a **real, gated SSH deploy**. It
-  runs only after a required reviewer approves the protected `production` environment, then SSHes to
-  the host and runs `deploy/host_deploy.sh` (compose pull + up + `/health` check). A
-  checkout-alignment guard aborts before deploy unless the host checkout matches the approved commit
-  SHA and is clean, so a new image never runs against stale host-side compose/config. See
-  `deploy/README.md` and `RUNBOOK.md`.
-
-### Secrets & the agent LLM
-
-Runtime config flows through `RTDP_*` settings; secrets are injected at run time (**Doppler**
-preferred for a host, or a local gitignored `.env`) — **no keys are committed and there is no
-Python Doppler dependency**. The agent's model stays **external and config-driven** via the
-OpenAI-compatible boundary (NVIDIA Build/NIM is the intended option) — **not** self-hosted, no
-GPU/inference provisioning, and **neither CI nor `/health` ever depends on it**.
-
-> Stage E status: **complete and live.** E1 (image) → E2 (telemetry boundary) → E3 (deploy assets)
-> → E4 (CI/CD) → E5 (docs) → E6 (single-host go-live) are all in place: the stack is provisioned and
-> deployed on one always-on host behind Caddy TLS, with the OpenTelemetry → Datadog observability
-> boundary validated live. The demo serves **synthetic data only**; multi-host / Kubernetes /
-> real-AWS deployment remains out of scope (see [roadmap](#out-of-scope--roadmap)).
-
----
-
-## Optional add-on — MCP server over the read API
-
-`rtdp mcp` starts a vendor-neutral [Model Context Protocol](https://modelcontextprotocol.io)
-server (official Python SDK, **stdio** transport) that exposes the six Stage 2A read endpoints as
-typed MCP tools, so any MCP client (Claude Code, Claude Desktop, MCP Inspector, …) can query the
-lakehouse. It occupies the same seat as the Stage D agent — **another HTTP client of the API**:
-
-`MCP client → rtdp mcp (stdio) → Stage 2A HTTP API → query → catalog`
-
-- **Read-only by construction.** Six GET-backed tools and nothing else — no write surface. The
-  server never imports `rtdp.query`, the catalog, or DuckDB/Iceberg table APIs (a boundary test
-  enforces this), and it adds no new API endpoint.
-- **Optional extra.** The `mcp` SDK ships behind the `[mcp]` extra (mirroring `[otel]`); the core
-  install and every other CLI command work without it, and `rtdp mcp` exits with an install hint
-  when it is missing.
-- **Requires a reachable read API.** The server does not start one — run `rtdp serve` first. A
-  startup probe warns on stderr until the API is up; stdout is reserved for MCP JSON-RPC frames.
-
-| MCP tool | Endpoint | Notes |
+| `agent` | `uv sync --extra agent` | The LangChain agent behind `rtdp agent`. |
+| `mcp` | `uv sync --extra mcp` | `rtdp mcp`, a read-only MCP server over the API (stdio). |
+| `otel` | `uv sync --extra otel` | OpenTelemetry export. Without it the telemetry boundary is a no-op. |
+
+Without an extra, `rtdp agent` and `rtdp mcp` exit with an install hint. Step-by-step instructions
+for Windows, including the LocalStack path, are in [`RUNBOOK.md`](RUNBOOK.md), along with the
+stage-by-stage reference (table design, ingestion and DQ rules, the API in detail, micro-batch
+ingestion, the agent, containers and observability).
+
+## What is in it
+
+| Stage | What it adds |
+| --- | --- |
+| Stage 1, lakehouse | A catalog-backed Iceberg table with schema evolution, partition evolution, snapshot time travel, and ingestion-time data-quality checks (FAIL aborts the write, WARN is reported). |
+| Stage 2A, read API | Typed flight reads, bounding-box queries, interval aggregations, and time travel behind an OpenAPI schema. Read-only. |
+| Stage 2B, micro-batch | `rtdp stream` polls a source and appends one micro-batch per interval through the same writer. Near-real-time micro-batch ingestion, not true streaming. |
+| Stage D, agent | `rtdp agent` answers questions and diagnoses data quality using the read API as its tools. |
+| Stage E, ops | One multi-entrypoint container image, compose profiles, an optional OpenTelemetry boundary, and CI/CD. |
+| Add-on, MCP | `rtdp mcp` exposes the read endpoints as MCP tools. Another HTTP client of the API, with no write surface. |
+
+### Read API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /livez` | Liveness: 200 whenever the process is serving. It touches no catalog or table. |
+| `GET /health` | Readiness: 200 when the catalog and table are reachable, 503 otherwise. |
+| `GET /flights` | Filter by `icao24`, `callsign`, or a time window; `limit` and `offset`. |
+| `GET /flights/bbox` | Latitude/longitude bounding box plus an optional time window. |
+| `GET /stats/flights-per-interval` | Counts per `hour` or `day`, optionally grouped by `origin_country`. |
+| `GET /snapshots` | The Iceberg snapshot history. |
+| `GET /meta` | Table identifier, snapshot pointer, schema, and partition spec. |
+
+The read endpoints accept `as_of_snapshot_id` or `as_of_timestamp` for time travel and echo the
+snapshot that answered. Filters on `icao24`, `callsign`, and time are pushed into the Iceberg scan,
+so partition pruning happens at the table-format level. DuckDB handles the SQL-shaped work. There
+is no auth, rate limiting, or caching yet.
+
+### The agent
+
+`rtdp agent` is strictly read-only and human-in-the-loop — proposes remediations, never mutates. It
+is built on LangChain's `create_agent` and talks to any OpenAI-compatible
+endpoint through `RTDP_AGENT_BASE_URL`, `RTDP_AGENT_MODEL`, and `RTDP_AGENT_API_KEY`.
+
+- Tools come from the live OpenAPI schema through a read-only allowlist of GET endpoints, plus one
+  composite `diagnose_data_quality` tool. There is no write tool to call.
+- Every answer is followed by a `Sources:` line naming the endpoint and snapshot id of each tool
+  call. The line is built from the tool results, never from the model's text.
+- A run is bounded by a model-turn budget and a tool-call budget. LangChain's limit middleware
+  enforces them, with small hooks that keep the pre-rewrite behaviour. Golden transcripts recorded
+  before the rewrite pin that behaviour.
+- Data-quality diagnosis re-derives anomalies from the rows the API returns. It is a bounded
+  sample (one queried window, capped by the API row limit, over the snapshots queried), and the
+  agent says so.
+- The CI tests use a scripted chat model. No model is called in CI.
+
+The live eval ([`scripts/eval_agent.py`](scripts/eval_agent.py)) is opt-in and network-gated. It is
+never run in CI. It runs a preregistered list of cases on synthetic data and scores the answers
+with fixed rules, so the result can be re-scored offline from the stored transcripts. The cases,
+pass criteria, bars, and stop rules were frozen before the first live call, and later changes are
+recorded as dated addenda. See [ADR 0003](docs/adr/0003-langchain-create-agent.md).
+
+### Demo
+
+[`deploy/hf-space/`](deploy/hf-space/) holds a read-only Hugging Face Space (Gradio SDK) that
+ingests seeded synthetic batches at startup and calls the real read API in-process. It exposes
+no agent and holds no key. A gated CI job, `deploy-space`, pushes that folder to the Space. The
+Space has not been deployed yet, so this README links no live URL. The earlier single-host VM
+demo is retired; see [ADR 0004](docs/adr/0004-microbatch-and-synthetic-demo-on-hf-spaces.md).
+
+## CI/CD
+
+`.github/workflows/ci.yml` runs these jobs with top-level `permissions: contents: read`:
+
+| Job | Runs | What it does |
 | --- | --- | --- |
-| `health` | `GET /health` | Catalog/table reachability + current snapshot id (an unhealthy 503 body is returned as data). |
-| `list_flights` | `GET /flights` | Filters (`icao24`, `callsign`, time window), paging, snapshot/timestamp time-travel. |
-| `list_flights_in_bbox` | `GET /flights/bbox` | Lat/lon bounding box (required), plus the same filters/paging/time-travel. |
-| `flights_per_interval` | `GET /stats/flights-per-interval` | Per-hour/day counts, optional `group_by=origin_country`, time-travel. |
-| `list_snapshots` | `GET /snapshots` | Snapshot history — ids feed the `as_of_snapshot_id` time-travel parameters. |
-| `get_meta` | `GET /meta` | Table identifier, snapshot pointer/count, schema, partition spec. |
+| `test` | push, pull request | Lint and the `file://` test suite with coverage. |
+| `telemetry-otel` | push, pull request | The telemetry tests with the `otel` extra installed. |
+| `mcp-extra` | push, pull request | The MCP tests with the `mcp` extra installed. |
+| `agent-extra` | push, pull request | The agent tests (golden transcripts, loop, model boundary, CLI, eval harness) with the `agent` extra installed. |
+| `integration-localstack` | push, pull request | The S3 integration tests against LocalStack. |
+| `docker-smoke` | push, pull request | Builds the image, checks `/health` on a synthetic `file://` warehouse, and validates the compose files and deploy scripts. |
+| `publish-image` | `main` only | Pushes the image to GHCR using the built-in `GITHUB_TOKEN`. |
+| `deploy-space` | `main` only | Pushes `deploy/hf-space/` to the Hugging Face Space, behind the protected `production` environment. |
 
-```bash
-# 1. Install the extra, seed data, and start the read-only API:
-uv sync --extra mcp
-uv run rtdp ingest --source synthetic --rows 80
-uv run rtdp serve                                   # http://127.0.0.1:8000
+`mcp-extra` and `agent-extra` do not gate publishing or deployment, because the published image
+carries neither extra. The VM deploy path (`deploy/host_deploy.sh` and friends) remains as a
+portable path, but its host is retired and CI no longer deploys to it.
 
-# 2. Run the MCP server (stdio; usually launched BY the MCP client — see below):
-uv run rtdp mcp                                     # --api-url / RTDP_AGENT_API_URL to override
-```
+## Observability
 
-Register it with an MCP client, e.g. Claude Code (`--directory` matters because MCP clients spawn
-servers from an arbitrary working directory):
+`rtdp.telemetry` is the single seam: structured logging always, and OpenTelemetry tracing only
+when `RTDP_OTEL_ENABLED=true` and the `otel` extra is installed. The custom spans are
+`rtdp.ingest.batch` and `rtdp.agent.tool_call`. The Datadog dashboard, monitors, and service check
+in [`deploy/observability/`](deploy/observability/README.md) were
+validated live on the retired host (E6.3); not currently deployed. There is no `/metrics` endpoint.
 
-```bash
-claude mcp add rtdp -- uv --directory <path-to-this-repo> run rtdp mcp
-```
+## Limitations
 
-or the generic JSON config used by Claude Desktop and most other clients:
+- The `file://` backend is a dev/CI convenience only — not the target architecture. The catalog is
+  SQLite, so the topology is single-writer.
+- Snapshot maintenance (`rtdp maintain expire-snapshots`) is metadata-only — NOT compaction.
+  pyiceberg can expire snapshots but cannot compact or rewrite data files in this build, so small
+  files accumulate under micro-batch appends.
+- The API has no auth, rate limiting, or caching. The agent consumes it as is.
+- `pyproject.toml` allows pyiceberg `>=0.10,<0.13`, but an unlocked install that resolves 0.12
+  fails the first partitioned write because `pyiceberg-core` is no longer pulled in. The lockfile
+  pins a working version, so use `uv sync --frozen`. A fix to the declared range is tracked
+  separately.
+- Gemini 3 models, reached through the OpenAI-compatible endpoint, require a thought signature to
+  be returned on each replayed tool call. The agent now returns it, based on the field shape
+  reported by users. Run 3 completed with no endpoint errors, so the replay worked. Model
+  availability also varies by account: run 2 aborted on a 404 because the model was no longer
+  available to new users.
+- Run 3 missed the preregistered task bar (6 of 9 against 0.75; decoys 3 of 3). One failure was the
+  model reading a correct total from `/snapshots`, an endpoint that case does not accept. One was a
+  model miss: it said no per-country grouping existed. One was an integration bug: a 19-digit
+  snapshot id reached the tool as a float and rounded to a different id. The executor now rejects
+  such ids with an explanation, but no run measured that change, and run 3's scores are unchanged.
+  With one attempt per case the intervals are wide.
+- The agent's data-quality diagnosis is a sample, not an audit, and the eval covers a fixed list of
+  cases on a small synthetic dataset.
+- The Hugging Face Space is prepared but not deployed, and the VM demo is retired. There is no
+  live demo today.
 
-```json
-{
-  "mcpServers": {
-    "rtdp": {
-      "command": "uv",
-      "args": ["--directory", "<path-to-this-repo>", "run", "rtdp", "mcp"]
-    }
-  }
-}
-```
+## Decisions
 
-Responses reuse the API's typed models (`rtdp.api.models`) as MCP structured output, so tool
-results carry schemas end to end. stdio is the only v1 transport (Streamable HTTP/SSE are
-documented later options, not built). Tests are deterministic and offline — the suite drives the
-FastAPI app in-process — and the CI `mcp-extra` job runs them with the extra installed.
+Architecture decision records are in [`docs/adr/`](docs/adr/):
 
----
+1. [pyiceberg, DuckDB, and a SQLite catalog, with no JVM](docs/adr/0001-pyiceberg-duckdb-sqlite-no-jvm.md)
+2. [The agent and the MCP server are HTTP clients of the read API](docs/adr/0002-agent-and-mcp-are-http-clients-of-the-read-api.md)
+3. [LangChain `create_agent` with deterministic provenance and budgets](docs/adr/0003-langchain-create-agent.md)
+4. [Micro-batch ingestion and a synthetic-only demo on Hugging Face Spaces](docs/adr/0004-microbatch-and-synthetic-demo-on-hf-spaces.md)
 
-## Testing
+## Direction for later stages (not commitments)
 
-```bash
-uv run pytest -m "not localstack"   # unit/integration on file:// (no Docker)
-uv run pytest -m localstack         # S3 path (needs LocalStack running)
-```
-
-CI runs both jobs on every push (`.github/workflows/ci.yml`): lint + the `file://` suite, and an
-integration job against LocalStack S3. See `RUNBOOK.md` for a step-by-step fresh-clone walkthrough.
-
-## Out of scope & roadmap
-
-**Not built yet (intentionally):** true streaming (Kafka/Flink), RAG / vector search, model
-fine-tuning, autonomous remediation (the Stage D agent *proposes*; a human applies), orchestration,
-**product/business-facing analytics and operational dashboards** (beyond the live E6.3 Datadog
-*observability* dashboard), **real provisioned cloud / multi-host (Kubernetes) deployment**,
-production IAM, and data-file compaction. (Stage E ships **single-host containerization + a real gated CI/CD deploy**,
-now live on one host behind Caddy TLS with Datadog observability — see
-[Stage E](#stage-e--productionization--observability). **Multi-host / Kubernetes / real-AWS /
-production-IAM deployment stays out of scope.**)
-The table/partition design anticipates continued appends without a rewrite, and the read API
-doubles as the agent's tool surface.
-
-**Direction for later stages (not commitments):**
-
-- **True streaming** — a continuous (Kafka/Flink-style) pipeline, beyond Stage 2B's scheduled
-  micro-batch loop.
-- **Retrieval (RAG) / vector search** and **richer agent autonomy** beyond the current read-only,
+- True streaming (Kafka or Flink style), beyond the scheduled micro-batch loop.
+- Retrieval (RAG) and vector search, and more agent autonomy than the current read-only,
   human-in-the-loop agent.
-- **Orchestration & product/analytics dashboards** (beyond the live Datadog *observability*
-  dashboard), then **real provisioned / multi-host deployment** beyond Stage E's single-host
-  containerized demo (real AWS S3 is already a config-only swap).
+- Orchestration and product-facing dashboards, then multi-host deployment beyond a single host.
+  Real AWS S3 is already a config-only swap.
+
+## Reproducing the results
+
+```bash
+make reproduce         # ruff, tests, synthetic ingest, DQ gate demo, a real `rtdp serve` probe
+make render-results    # fill the Results block above from results/metrics.json
+```
+
+`make reproduce` makes no live calls: no model and no OpenSky. It re-scores recorded eval runs from
+their transcripts and merges the recorded OpenSky run, both labelled as recorded. The generated
+`results/metrics.json` carries the commit it measured, and the script refuses to call a run clean
+on a dirty working tree.

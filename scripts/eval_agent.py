@@ -1,199 +1,404 @@
-"""Opt-in live evaluation harness for the Stage D agent.
+"""Preregistered live evaluation of the Stage D agent (opt-in; network-gated; never run in CI).
 
-NETWORK-GATED AND NEVER RUN IN CI. It makes real LLM calls and requires a running ``rtdp serve``.
-It is not imported by any test. Run it manually only:
+The case list, pass criteria, bars, k, and stop rules are frozen in scripts/agent_eval_scoring.py
+(PREREGISTRATION) before any live call, and copied verbatim into the report. Data is synthetic
+only: two seeded ingests into a throwaway file:// warehouse, served in-process through
+fastapi.testclient.TestClient (the same read API routes over HTTP semantics; no server, no
+network). The model endpoint is the only live dependency.
 
-    # 1) seed a little data and serve it (separate shell)
-    uv run rtdp ingest --rows 80
-    uv run rtdp serve
+    # 1) no model calls: show the preregistration and the ground truth it will be scored against
+    uv run --extra agent python scripts/eval_agent.py --dry-run
 
-    # 2) configure an OpenAI-compatible model endpoint, then run the harness
-    $env:RTDP_AGENT_BASE_URL = "https://integrate.api.nvidia.com/v1"   # example: NVIDIA NIM
-    $env:RTDP_AGENT_MODEL    = "meta/llama-3.1-8b-instruct"
-    $env:RTDP_AGENT_API_KEY  = "<your key>"                            # never commit this
-    uv run python scripts/eval_agent.py --report _agent_eval_report.json
+    # 2) live run (needs the [agent] extra and an OpenAI-compatible endpoint; never commit a key)
+    #    RTDP_AGENT_BASE_URL, RTDP_AGENT_MODEL, RTDP_AGENT_API_KEY set in the environment
+    uv run --extra agent python scripts/eval_agent.py --pause-seconds 10
 
-Reports per-case grounding/faithfulness, tool-call correctness, latency, and token usage, and
-lists failures explicitly. Config flows through RTDP_* / Settings; no keys are written to the
-report. The report path is git-ignored.
+Writes results/agent_eval.json: preregistration, run metadata (model id as listed by
+GET {base}/models, date, package versions, commit), ground truth, per-case transcripts, and
+scores. No keys or raw request payloads are written. Re-score offline with
+``agent_eval_scoring.score_report``.
 """
 
 from __future__ import annotations
 
 import argparse
+import gc
 import json
+import platform
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
-from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from importlib import metadata
+from pathlib import Path
+from urllib.parse import urlparse
 
-from rtdp.agent.runtime import answer_question, build_http_client, build_llm_client
-from rtdp.config import Settings
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import agent_eval_scoring as scoring  # noqa: E402
 
-@dataclass
-class EvalCase:
-    name: str
-    question: str
-    expect_endpoint: str  # substring expected in the cited provenance
-    expect_proposals: bool = False  # DQ cases should surface remediation proposals
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_REPORT = REPO_ROOT / "results" / "agent_eval.json"
+API_BASE = "http://testserver"  # TestClient's base URL: in-process, no network
 
-
-CASES: list[EvalCase] = [
-    EvalCase(
-        "count_recent",
-        "How many flight records are available? Cite the snapshot.",
-        "/flights",
-    ),
-    EvalCase(
-        "by_country",
-        "Which origin countries appear most in the data?",
-        "/stats/flights-per-interval",
-    ),
-    EvalCase(
-        "data_quality",
-        "Are there any data-quality issues? Propose fixes.",
-        "diagnose",
-        expect_proposals=True,
-    ),
-]
+# Deterministic values from the seeded synthetic data (see scoring.DATASET). Frozen with the
+# preregistration; the run aborts before any model call if the data does not reproduce them.
+FROZEN_EXPECTED: dict = scoring.EXPECTED_VALUES
 
 
-@dataclass
-class CaseReport:
-    name: str
-    question: str
-    answer: str
-    complete: bool
-    latency_s: float
-    tokens: int | None
-    cited_endpoints: list[str]
-    checks: dict[str, bool] = field(default_factory=dict)
-    failures: list[str] = field(default_factory=list)
-
-    @property
-    def passed(self) -> bool:
-        return not self.failures
+# --------------------------------------------------------------------------- dataset + truth
 
 
-def _evaluate(case: EvalCase, settings: Settings, llm, client) -> CaseReport:
+def build_dataset(workdir: Path):
+    """Two seeded synthetic ingests into a throwaway file:// warehouse; returns Settings."""
+    from rtdp.config import Settings
+    from rtdp.ingest import run_ingest
+    from rtdp.sources.synthetic import SyntheticSource
+
+    settings = Settings(
+        storage_backend="file",
+        local_warehouse_dir=workdir / "warehouse",
+        catalog_db_path=workdir / "warehouse" / "catalog.db",
+        agent_api_url=API_BASE,
+    )
+    for batch in scoring.DATASET["ingests"]:
+        result = run_ingest(
+            settings, SyntheticSource(base_date=scoring.DATASET["base_date"], **batch)
+        )
+        if not result.dq.ok:
+            raise RuntimeError("synthetic ingest unexpectedly failed its DQ gate")
+    return settings
+
+
+def _get(client, path: str, **params):
+    resp = client.get(f"{API_BASE}{path}", params=params)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def compute_ground_truth(client) -> dict:
+    """Expected answers, read straight from the read API (not through the agent)."""
+    snapshots = _get(client, "/snapshots")
+    first_id, latest_id = snapshots[0]["snapshot_id"], snapshots[-1]["snapshot_id"]
+
+    def total(**params) -> int:
+        stats = _get(client, "/stats/flights-per-interval", interval="day", **params)
+        return sum(bucket["count"] for bucket in stats["buckets"])
+
+    by_country: dict[str, int] = {}
+    stats = _get(client, "/stats/flights-per-interval", interval="day", group_by="origin_country")
+    for bucket in stats["buckets"]:
+        by_country[bucket["group"]] = by_country.get(bucket["group"], 0) + bucket["count"]
+    best = max(by_country.values())
+    top = sorted(country for country, count in by_country.items() if count == best)
+
+    day = _get(client, "/stats/flights-per-interval", interval="day")["buckets"]
+    day_rows = sum(b["count"] for b in day if b["bucket_start"].startswith(scoring.DAY_UNDER_TEST))
+    callsign_rows = _get(client, "/flights", callsign=scoring.WARN_CALLSIGN, limit=1000)["items"]
+    return {
+        "total_rows": total(),
+        "top_country": top[0] if len(top) == 1 else top,
+        "callsign_icao24s": sorted({row["icao24"] for row in callsign_rows}),
+        "bbox_rows": _get(client, "/flights/bbox", limit=1000, **scoring.BBOX)["count"],
+        "day_rows": day_rows,
+        "duplicate_icao24_rows": _get(
+            client, "/flights", icao24=scoring.DUPLICATE_ICAO24, limit=1000
+        )["count"],
+        "snapshot_count": len(snapshots),
+        "first_snapshot_id": first_id,
+        "latest_snapshot_id": latest_id,
+        "first_snapshot_rows": total(as_of_snapshot_id=first_id),
+    }
+
+
+def check_frozen(truth: dict) -> list[str]:
+    """Mismatches between the run's ground truth and the frozen expected values."""
+    return [
+        f"{key}: expected {want!r}, got {truth.get(key)!r}"
+        for key, want in FROZEN_EXPECTED.items()
+        if truth.get(key) != want
+    ]
+
+
+# --------------------------------------------------------------------------- run
+
+
+# Addendum 2026-10-27.A1: abort when the first attempts all fail with the same non-quota HTTP 4xx.
+SYSTEMIC_ATTEMPTS = 3
+
+
+class AbortRun(Exception):
+    """A preregistered stop rule fired (quota/rate limit or auth)."""
+
+
+def is_abort_error(exc: BaseException) -> bool:
+    """Stop rule: quota/rate-limit (429, RESOURCE_EXHAUSTED) or auth (401/403) aborts the run."""
+    status = getattr(exc, "status_code", None)
+    if status in (401, 403, 429):
+        return True
+    return "RESOURCE_EXHAUSTED" in str(exc) or type(exc).__name__ in (
+        "RateLimitError",
+        "AuthenticationError",
+        "PermissionDeniedError",
+    )
+
+
+def _http_status(exc: BaseException) -> int | None:
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status
+    match = re.search(r"Error code: (\d{3})", str(exc))
+    return int(match[1]) if match else None
+
+
+def _check_systemic(cases: list[dict]) -> None:
+    """Stop rule (addendum A1): the first 3 attempts all failed with one non-quota HTTP 4xx."""
+    first = [a for entry in cases for a in entry["attempts"]]
+    if len(first) != SYSTEMIC_ATTEMPTS or not all(a.get("exception") for a in first):
+        return
+    statuses = {a.get("exception_status") for a in first}
+    status = next(iter(statuses))
+    if len(statuses) == 1 and status is not None and 400 <= status < 500:
+        raise AbortRun(f"systemic endpoint error: the first {SYSTEMIC_ATTEMPTS} attempts all "
+                       f"failed with HTTP {status}")
+
+
+def _short(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def run_case(question: str, *, settings, llm, executor, tools) -> dict:
+    """One attempt; returns the stored transcript (never raises except AbortRun)."""
+    from rtdp.agent.loop import run_agent
+
+    tool_calls: list[dict] = []
+
+    def on_event(kind: str, payload) -> None:
+        if kind == "tool_call":
+            tool_calls.append({"name": payload.get("name"), "args": payload.get("args")})
+
     start = time.perf_counter()
-    result = answer_question(settings, case.question, llm=llm, client=client)
-    latency = time.perf_counter() - start
-
-    cited = [p.endpoint for p in result.provenance]
-    report = CaseReport(
-        name=case.name,
-        question=case.question,
-        answer=result.answer,
-        complete=result.complete,
-        latency_s=round(latency, 3),
-        tokens=result.tokens,
-        cited_endpoints=cited,
-    )
-
-    # --- grounding / correctness checks (heuristic; an open model is non-deterministic) ---
-    completed = result.complete and bool(result.answer.strip())
-    report.checks["completed"] = completed
-    if not completed:
-        report.failures.append("did not produce a complete, non-empty answer")
-
-    used_expected_tool = any(case.expect_endpoint in endpoint for endpoint in cited)
-    report.checks["tool_call_correct"] = used_expected_tool
-    if not used_expected_tool:
-        report.failures.append(
-            f"expected a tool call citing '{case.expect_endpoint}', got {cited or 'none'}"
+    try:
+        result = run_agent(
+            question, llm=llm, executor=executor, tools=tools,
+            max_turns=settings.agent_max_turns, max_tool_calls=settings.agent_max_tool_calls,
+            on_event=on_event,
         )
+    except Exception as exc:  # noqa: BLE001 — every model-side failure is recorded
+        if is_abort_error(exc):
+            raise AbortRun(_short(exc)) from exc
+        return {
+            "answer": "", "provenance": [], "tool_calls": tool_calls, "turns": None,
+            "complete": False, "error": None, "tokens": None,
+            "latency_s": round(time.perf_counter() - start, 3), "exception": _short(exc),
+            "exception_status": _http_status(exc),
+        }
+    return {
+        "answer": result.answer,
+        "provenance": [vars(p) for p in result.provenance],
+        "citation_line": result.citation_line(),
+        "tool_calls": tool_calls,
+        "turns": result.turns,
+        "complete": result.complete,
+        "error": result.error,
+        "tokens": result.tokens,
+        "latency_s": round(time.perf_counter() - start, 3),
+        "exception": None,
+        "exception_status": None,
+    }
 
-    cites_snapshot = any(p.snapshot_id is not None for p in result.provenance)
-    report.checks["cites_snapshot"] = cites_snapshot
-    if not cites_snapshot:
-        report.failures.append("no snapshot id was cited in any tool result")
 
-    if case.expect_proposals:
-        proposes = "propos" in result.answer.lower() or "PROPOSED" in result.answer
-        report.checks["proposes_remediation"] = proposes
-        if not proposes:
-            report.failures.append("DQ case did not surface a remediation proposal")
-        # The agent must never claim to have applied a change.
-        lowered = result.answer.lower()
-        claims_applied = any(
-            phrase in lowered for phrase in ("i applied", "i fixed", "i deleted", "i updated")
+def run_eval(settings, client, llm, *, truth: dict, k: int, pause_s: float = 0.0) -> dict:
+    """Run every case k times in order; stops early only on a preregistered abort."""
+    from rtdp.agent.runtime import build_registry
+    from rtdp.agent.tools import ApiToolExecutor
+
+    registry = build_registry(settings, client)
+    executor = ApiToolExecutor(API_BASE, client, registry, max_rows=settings.agent_max_rows)
+    tools = registry.definitions()
+    cases: list[dict] = []
+    status, abort_reason = "completed", None
+    try:
+        for index, case in enumerate(scoring.CASES):
+            question = case["question"].format(**truth)
+            entry = {"name": case["name"], "kind": case["kind"], "question": question,
+                     "attempts": []}
+            cases.append(entry)
+            for _ in range(k):
+                entry["attempts"].append(
+                    run_case(question, settings=settings, llm=llm, executor=executor, tools=tools)
+                )
+                _check_systemic(cases)
+            if pause_s and index < len(scoring.CASES) - 1:
+                time.sleep(pause_s)
+    except AbortRun as exc:
+        status, abort_reason = "aborted", str(exc)
+        if cases and not cases[-1]["attempts"]:
+            cases.pop()  # the aborted case has no completed attempt to score
+    report = {"ground_truth": truth, "cases": cases}
+    return {
+        "status": status,
+        "abort_reason": abort_reason,
+        "cases": cases,
+        "scores": scoring.score_report(report),
+    }
+
+
+# --------------------------------------------------------------------------- metadata
+
+
+def _versions() -> dict:
+    names = ("langchain", "langchain-core", "langchain-openai", "langgraph", "openai")
+    found = {}
+    for name in names:
+        try:
+            found[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            found[name] = None
+    return found
+
+
+def _git(*args: str) -> str | None:
+    try:
+        out = subprocess.run(
+            ["git", *args], cwd=REPO_ROOT, check=True, capture_output=True, text=True
         )
-        report.checks["no_autonomous_action"] = not claims_applied
-        if claims_applied:
-            report.failures.append("answer claims to have applied a change (must be HITL-only)")
-
-    return report
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return out.stdout.strip()
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Opt-in live eval for the Stage D agent")
-    parser.add_argument(
-        "--report", default=None, help="write a JSON report to this path (git-ignored)"
+def model_listing(settings) -> dict:
+    """Whether the configured model appears in GET {base}/models (one live, read-only call)."""
+    import httpx
+
+    key = settings.agent_api_key
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    resp = httpx.get(
+        f"{settings.agent_base_url.rstrip('/')}/models", headers=headers,
+        timeout=settings.agent_timeout_seconds,
     )
+    resp.raise_for_status()
+    ids = [m.get("id", "") for m in resp.json().get("data", [])]
+    wanted = settings.agent_model
+    match = next((i for i in ids if i in (wanted, f"models/{wanted}")), None)
+    return {"listed": match is not None, "listed_id": match, "models_returned": len(ids)}
+
+
+def run_metadata(settings, *, k: int, pause_s: float) -> dict:
+    return {
+        "date_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+        "commit_sha": _git("rev-parse", "HEAD"),
+        "working_tree_dirty": bool(_git("status", "--porcelain")),
+        "model": settings.agent_model,
+        "endpoint_host": urlparse(settings.agent_base_url or "").hostname,
+        "temperature": settings.agent_temperature,
+        "max_turns": settings.agent_max_turns,
+        "max_tool_calls": settings.agent_max_tool_calls,
+        "k": k,
+        "pause_seconds_between_cases": pause_s,
+        "python": platform.python_version(),
+        "packages": _versions(),
+        "data": "synthetic only",
+        "preregistration_addenda": [a["id"] for a in scoring.ADDENDA],
+    }
+
+
+# --------------------------------------------------------------------------- main
+
+
+def _remove_workdir(path: Path) -> None:
+    """Delete the throwaway warehouse without ever failing the run.
+
+    On Windows SQLite keeps catalog.db open until the catalog's engine is garbage-collected, and
+    an open file cannot be deleted; collect first, then remove what can be removed.
+    """
+    gc.collect()
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _evaluate(workdir: Path, args, llm, k: int):
+    """Build the dataset, check it, and run the cases; returns an exit code or the results."""
+    from fastapi.testclient import TestClient
+
+    from rtdp.api.app import create_app
+
+    settings = build_dataset(workdir)
+    with TestClient(create_app(settings), base_url=API_BASE) as client:
+        truth = compute_ground_truth(client)
+        mismatches = check_frozen(truth)
+        if args.dry_run:
+            print(json.dumps({"preregistration": scoring.PREREGISTRATION,
+                              "ground_truth": truth, "frozen_mismatches": mismatches},
+                             indent=2, default=str))
+            return 0 if not mismatches else 2
+        if mismatches:
+            print("Synthetic data does not reproduce the frozen values; aborting before any "
+                  "model call:\n  " + "\n  ".join(mismatches), file=sys.stderr)
+            return 2
+        if llm is None:
+            if not settings.agent_base_url or not settings.agent_model:
+                print("Live eval requires RTDP_AGENT_BASE_URL and RTDP_AGENT_MODEL (and "
+                      "RTDP_AGENT_API_KEY if the endpoint needs one). No calls made.",
+                      file=sys.stderr)
+                return 2
+            from rtdp.agent.runtime import build_llm_client
+
+            listing = model_listing(settings)
+            llm = build_llm_client(settings)
+        else:
+            listing = {"listed": None, "listed_id": None, "models_returned": None}
+        meta = run_metadata(settings, k=k, pause_s=args.pause_seconds)
+        meta["model_listing"] = listing
+        outcome = run_eval(settings, client, llm, truth=truth, k=k, pause_s=args.pause_seconds)
+    return meta, truth, outcome
+
+
+def main(argv: list[str] | None = None, *, llm=None) -> int:
+    parser = argparse.ArgumentParser(description="Preregistered live eval for the Stage D agent")
+    parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the preregistration + ground truth; make no model calls")
+    parser.add_argument("--pause-seconds", type=float, default=0.0,
+                        help="pause between cases (rate-limit pacing; not counted in latency)")
     args = parser.parse_args(argv)
-
-    settings = Settings()
-    if not settings.agent_base_url or not settings.agent_model:
-        print(
-            "Live eval requires RTDP_AGENT_BASE_URL and RTDP_AGENT_MODEL to be set "
-            "(and RTDP_AGENT_API_KEY if the endpoint needs one). Aborting — no calls made.",
-            file=sys.stderr,
-        )
+    k = scoring.PREREGISTRATION["k"]
+    if not args.dry_run and args.report.exists():
+        print(f"{args.report} already exists; refusing to overwrite a recorded run. Write a new "
+              "run to a new --report path.", file=sys.stderr)
         return 2
 
-    client = build_http_client(settings)
+    workdir = Path(tempfile.mkdtemp(prefix="rtdp-eval-"))
     try:
-        try:
-            client.get(f"{settings.agent_api_base_url}/health")
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"Read API not reachable at {settings.agent_api_base_url}: {exc}\n"
-                "Start it first with `rtdp serve`.",
-                file=sys.stderr,
-            )
-            return 2
-        llm = build_llm_client(settings)
-        reports = [_evaluate(case, settings, llm, client) for case in CASES]
+        result = _evaluate(workdir, args, llm, k)
     finally:
-        client.close()
+        _remove_workdir(workdir)
+    if isinstance(result, int):
+        return result
+    meta, truth, outcome = result
 
-    passed = sum(r.passed for r in reports)
-    print(f"\n=== Stage D agent eval: {passed}/{len(reports)} cases passed ===")
-    for r in reports:
-        status = "PASS" if r.passed else "FAIL"
-        tokens = "n/a" if r.tokens is None else r.tokens
-        print(f"\n[{status}] {r.name}  ({r.latency_s}s, tokens={tokens})")
-        print(f"  Q: {r.question}")
-        print(f"  A: {r.answer.strip()[:280]}")
-        print(f"  sources: {r.cited_endpoints or 'none'}")
-        for failure in r.failures:
-            print(f"  - FAILURE: {failure}")
+    report = {
+        "preregistration": scoring.PREREGISTRATION,
+        "run": meta | {"status": outcome["status"], "abort_reason": outcome["abort_reason"]},
+        "ground_truth": truth,
+        "cases": outcome["cases"],
+        "scores": outcome["scores"],
+    }
+    args.report.parent.mkdir(parents=True, exist_ok=True)
+    args.report.write_text(json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8")
 
-    if args.report:
-        payload = {
-            "summary": {"passed": passed, "total": len(reports)},
-            "cases": [
-                {
-                    "name": r.name,
-                    "question": r.question,
-                    "answer": r.answer,
-                    "complete": r.complete,
-                    "latency_s": r.latency_s,
-                    "tokens": r.tokens,
-                    "cited_endpoints": r.cited_endpoints,
-                    "checks": r.checks,
-                    "failures": r.failures,
-                }
-                for r in reports
-            ],
-        }
-        # No API keys or raw request payloads are included — only questions, answers, and scores.
-        with open(args.report, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, default=str)
-        print(f"\nWrote report to {args.report}")
-
-    return 0 if passed == len(reports) else 1
+    summary = outcome["scores"]["summary"]
+    print(f"status={outcome['status']} tasks={summary['tasks']} decoys={summary['decoys']}")
+    for name, scores in outcome["scores"]["per_case"].items():
+        print(f"  {'PASS' if all(s['passed'] for s in scores) else 'FAIL'}  {name}")
+    print(f"Wrote {args.report}")
+    if outcome["status"] == "aborted":
+        print(f"ABORTED (preregistered stop rule): {outcome['abort_reason']}", file=sys.stderr)
+        return 3
+    return 0
 
 
 if __name__ == "__main__":

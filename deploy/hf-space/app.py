@@ -107,6 +107,8 @@ class Backend:
 
     def close(self) -> None:
         client, self._client = self._client, None
+        if client is None:  # already closed
+            return
         try:
             client.__exit__(None, None, None)
         finally:

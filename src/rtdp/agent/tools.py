@@ -270,8 +270,9 @@ def _extract_snapshot_id(data: Any) -> int | None:
     return value if value is not None else data.get("current_snapshot_id")
 
 
-# Largest integer a float (IEEE 754 double) holds exactly. Some providers deliver tool-call numbers
-# as doubles, so a 19-digit snapshot id arrives already rounded to a different, wrong id.
+# From 2**53 up, a float (IEEE 754 double) no longer holds every integer: 2**53 + 1 arrives as
+# 2**53. Some providers deliver tool-call numbers as doubles, so a 19-digit snapshot id arrives
+# already rounded to a different, wrong id.
 _MAX_EXACT_FLOAT_INT = 2**53
 
 
@@ -281,7 +282,7 @@ class _InexactInteger(ValueError):
 
 def _coerce(value: Any, json_type: str) -> Any:
     if json_type == "integer":
-        if isinstance(value, float) and abs(value) > _MAX_EXACT_FLOAT_INT:
+        if isinstance(value, float) and abs(value) >= _MAX_EXACT_FLOAT_INT:
             raise _InexactInteger(value)
         return int(value)
     if json_type == "number":

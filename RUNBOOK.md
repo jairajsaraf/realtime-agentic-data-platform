@@ -309,7 +309,9 @@ bash scripts/docker_smoke.sh                       # build -> seed (file://) -> 
 ```
 Success: `OK: /health returned 200` then a JSON health body. The same image exposes every runtime
 as a command: `serve` (read API), `stream` (micro-batch writer), `maintain expire-snapshots`
-(one-shot), `agent "<q>"` (on-demand). `SKIP_BUILD=1` smokes a prebuilt image.
+(one-shot), `agent "<q>"` (on-demand). The agent needs the `[agent]` extra in the image: build with
+`--build-arg RTDP_INSTALL_EXTRAS=agent` (one extra per build; the default image prints the install hint
+and exits 2). `SKIP_BUILD=1` smokes a prebuilt image.
 
 ### 2. Single-host Docker Compose topology
 
@@ -954,7 +956,7 @@ A single Docker image (`Dockerfile`) wraps the `rtdp` CLI; the container command
 | `rtdp serve` | read-only API (the only externally exposed service) |
 | `rtdp stream` | the sole writer — one micro-batch snapshot per interval (synthetic source) |
 | `rtdp maintain expire-snapshots` | one-shot, metadata-only snapshot expiration |
-| `rtdp agent "<q>"` | on-demand agent question (external, config-driven LLM) |
+| `rtdp agent "<q>"` | on-demand agent question (external, config-driven LLM); needs an image built with `--build-arg RTDP_INSTALL_EXTRAS=agent` |
 
 ```bash
 docker build -t rtdp:local .

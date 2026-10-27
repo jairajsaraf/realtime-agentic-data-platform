@@ -173,11 +173,14 @@ def _maintain(settings: Settings, args: argparse.Namespace) -> int:
 
 
 # Top-level modules of the optional [agent] extra; an ImportError naming anything else is a bug.
-_AGENT_SDK_MODULES = {"langchain", "langchain_core", "langchain_openai", "langgraph", "openai"}
+_AGENT_SDK_MODULES = {
+    "langchain", "langchain_core", "langchain_openai", "langgraph", "langsmith", "openai"
+}
 
 
 def _agent(settings: Settings, args: argparse.Namespace) -> int:
     try:
+        from .agent import llm as _llm  # noqa: F401 — imported lazily later; check the SDK now
         from .agent.runtime import answer_question, build_http_client, build_llm_client
     except ImportError as exc:
         # Only a missing [agent] SDK means "install the extra"; any other ImportError is a real

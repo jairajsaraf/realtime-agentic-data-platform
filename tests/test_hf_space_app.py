@@ -104,6 +104,7 @@ def test_close_removes_the_workdir(tmp_path):
     instance = space.Backend(tmp_path / "w")
     instance.close()
     assert not (tmp_path / "w").exists()
+    instance.close()  # a second close is a no-op
 
 
 # ------------------------------------------------------------------ boundary: API only

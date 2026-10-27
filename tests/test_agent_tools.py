@@ -165,12 +165,13 @@ def test_execute_coerces_argument_types():
 _BIG_ID = 7583312095669219978
 
 
-def test_execute_rejects_an_id_that_arrived_as_an_inexact_float():
+@pytest.mark.parametrize("value", [float(_BIG_ID), float(2**53 + 1)])  # the latter equals 2**53
+def test_execute_rejects_an_id_that_arrived_as_an_inexact_float(value):
     calls: list = []
     executor = ApiToolExecutor(
         "http://test", _client(lambda r: calls.append(r) or httpx.Response(200)), static_registry()
     )
-    result = executor.execute("flights", {"as_of_snapshot_id": float(_BIG_ID)})
+    result = executor.execute("flights", {"as_of_snapshot_id": value})
     assert result.ok is False
     assert "as_of_snapshot_id" in result.error and "string of digits" in result.error
     assert calls == []  # never sent: the rounded id would silently query the wrong snapshot

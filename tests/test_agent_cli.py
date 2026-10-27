@@ -52,6 +52,20 @@ def test_cli_agent_missing_extra_exits_2_with_hint(monkeypatch, capsys):
     assert "rtdp[agent]" in err
 
 
+def test_cli_agent_partial_extra_still_gets_the_hint(monkeypatch, capsys):
+    # langchain present but langchain-openai missing: the hint, not a later traceback.
+    pytest.importorskip("langchain", reason="requires the optional [agent] extra")
+    for name in [m for m in sys.modules if m.startswith(("langchain_openai", "rtdp.agent"))]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setitem(sys.modules, "langchain_openai", None)
+    import rtdp
+
+    if hasattr(rtdp, "agent"):
+        monkeypatch.delattr(rtdp, "agent")
+    assert main(["agent", "q"]) == 2
+    assert "--extra agent" in capsys.readouterr().err
+
+
 def test_cli_agent_reraises_non_sdk_import_errors(monkeypatch):
     # A failure inside our own module (name not an SDK) must surface, never show the hint.
     monkeypatch.setitem(sys.modules, "rtdp.agent.runtime", None)

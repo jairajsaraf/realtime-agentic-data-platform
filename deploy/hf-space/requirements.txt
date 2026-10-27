@@ -1,0 +1,8 @@
+# gradio comes from the Space's sdk_version (see README.md).
+# pyiceberg is pinned to the version in the repo's uv.lock: with the newest pyiceberg (0.12) the
+# `pyarrow` extra no longer installs pyiceberg-core and the startup ingest crashes. A test keeps
+# this pin equal to uv.lock.
+# The deploy job replaces the commit placeholder with the commit it deploys; a literal placeholder
+# fails the build on purpose.
+pyiceberg==0.11.1
+rtdp @ git+https://github.com/jairajsaraf/realtime-agentic-data-platform@__RTDP_COMMIT_SHA__

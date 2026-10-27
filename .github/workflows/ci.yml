@@ -111,7 +111,7 @@ jobs:
       - name: Sync dependencies (with [agent] extra)
         run: uv sync --frozen --extra agent
       - name: Agent tests (golden transcripts, loop, model boundary, CLI wiring, tools, DQ)
-        run: uv run --extra agent -- pytest tests/test_agent_boundary.py tests/test_agent_golden.py tests/test_agent_loop.py tests/test_agent_llm.py tests/test_agent_cli.py tests/test_agent_tools.py tests/test_agent_dq.py -m "not localstack" --cov=rtdp.agent --cov-branch --cov-report=xml
+        run: uv run --extra agent -- pytest tests/test_agent_boundary.py tests/test_agent_golden.py tests/test_agent_loop.py tests/test_agent_llm.py tests/test_agent_cli.py tests/test_agent_tools.py tests/test_agent_dq.py tests/test_eval_agent.py -m "not localstack" --cov=rtdp.agent --cov-branch --cov-report=xml
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:

@@ -1,0 +1,14 @@
+{
+  "recorded_utc": "2026-10-26T23:53:41+00:00",
+  "command": "rtdp ingest --source opensky-live (python -m rtdp.cli; anonymous tier)",
+  "exit_code": 0,
+  "wall_seconds": 3.171,
+  "rows_in_batch": 9167,
+  "dq_status": "PASS",
+  "dq_failure_cases": 0,
+  "dq_warning_cases": 2,
+  "rows_written": 9167,
+  "error_class": null,
+  "temp_dir_removed": true,
+  "notes": "Counts only. No records, failure-case values, or warehouse files were kept; the throwaway warehouse lived outside the repo and was deleted. DQ counts are failure/warning cases (one per failing value), not rows."
+}

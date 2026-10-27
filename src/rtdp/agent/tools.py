@@ -270,8 +270,19 @@ def _extract_snapshot_id(data: Any) -> int | None:
     return value if value is not None else data.get("current_snapshot_id")
 
 
+# Largest integer a float (IEEE 754 double) holds exactly. Some providers deliver tool-call numbers
+# as doubles, so a 19-digit snapshot id arrives already rounded to a different, wrong id.
+_MAX_EXACT_FLOAT_INT = 2**53
+
+
+class _InexactInteger(ValueError):
+    """An integer argument arrived as a float too large to hold it exactly."""
+
+
 def _coerce(value: Any, json_type: str) -> Any:
     if json_type == "integer":
+        if isinstance(value, float) and abs(value) > _MAX_EXACT_FLOAT_INT:
+            raise _InexactInteger(value)
         return int(value)
     if json_type == "number":
         return float(value)
@@ -296,6 +307,12 @@ def _validate_args(tool: ApiTool, arguments: dict) -> tuple[bool, dict, str | No
             continue
         try:
             cleaned[name] = _coerce(value, tool.param_types[name])
+        except _InexactInteger:
+            errors.append(
+                f"parameter '{name}' arrived as the floating-point number {value!r}, which cannot "
+                "hold the exact id; pass the id exactly as listed by the snapshots tool, as a "
+                "string of digits if needed"
+            )
         except (ValueError, TypeError):
             errors.append(f"parameter '{name}' must be {tool.param_types[name]}")
     if errors:

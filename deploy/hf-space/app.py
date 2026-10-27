@@ -106,10 +106,14 @@ class Backend:
         }
 
     def close(self) -> None:
+        client, self._client = self._client, None
         try:
-            self._client.__exit__(None, None, None)
+            client.__exit__(None, None, None)
         finally:
-            gc.collect()  # release SQLite's handle first; Windows cannot delete an open file
+            # Drop the last reference to the app (and its cached catalog) so collection closes
+            # SQLite's handle; Windows cannot delete an open file.
+            del client
+            gc.collect()
             shutil.rmtree(self.workdir, ignore_errors=True)
 
 

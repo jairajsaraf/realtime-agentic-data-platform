@@ -38,3 +38,4 @@ _agent_eval_report*.json
 results/*
 !results/agent_eval.json
 !results/opensky_live_run.json
+!results/metrics.json

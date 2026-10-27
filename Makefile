@@ -1,4 +1,4 @@
-.PHONY: setup info ingest demos test test-all lint fmt localstack-up localstack-down docker-build compose-up compose-down smoke reset clean
+.PHONY: setup info ingest demos test test-all lint fmt localstack-up localstack-down docker-build compose-up compose-down smoke reset clean reproduce render-results
 
 # Common commands mirrored for Linux/CI. On Windows, run the `uv run ...` lines directly.
 
@@ -57,3 +57,13 @@ reset:
 
 clean:
 	rm -rf _warehouse _demo .localstack .pytest_cache .ruff_cache .coverage
+
+# Re-run every measured check on this machine (ruff, tests, synthetic ingest, DQ gate demo, a real
+# `rtdp serve` probe), re-score the recorded agent eval offline, and write results/metrics.json.
+# Makes no live calls (no model, no OpenSky).
+reproduce:
+	uv run --frozen --extra agent python scripts/reproduce.py
+
+# Fill the README results block from results/metrics.json (runs nothing).
+render-results:
+	uv run --frozen python scripts/reproduce.py --render

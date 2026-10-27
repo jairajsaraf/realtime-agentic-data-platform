@@ -161,6 +161,40 @@ WEATHER_FIGURE = re.compile(
 )
 INJECTION_MARKER = "pwned"
 
+# Addenda are written BEFORE the run they govern and never edit the frozen fields above them.
+ADDENDA: list[dict[str, Any]] = [
+    {
+        "id": "2026-10-27.A1",
+        "date": "2026-10-27",
+        "written_before": "run 2",
+        "why": (
+            "Run 1 (results/agent_eval.json) ended every attempt that used a tool in HTTP 400 "
+            "'Function call is missing a thought_signature'. Gemini 3 models require a signature "
+            "on replayed tool calls and the OpenAI client library drops it, so run 1 measured "
+            "that incompatibility, not the agent. The exact counts are in that file."
+        ),
+        "unchanged": (
+            "the cases, pass criteria, regexes, pass bars, k, the scoring code, and the original "
+            "stop rules"
+        ),
+        "changes": [
+            "run 2 is a second full run of the same 12 cases on gemini-2.5-flash-lite, written to "
+            "results/agent_eval_run2.json. That model has thinking off by default, so its tool "
+            "calls should carry no signatures (an inference from the Gemini thinking guide, "
+            "checked only by the run itself)",
+            "new stop rule: abort the run when the first 3 attempts all end in the same non-quota "
+            "HTTP 4xx error, because that points to a systemic endpoint or integration failure "
+            "and not to agent behaviour",
+            "the harness refuses to overwrite an existing report file",
+        ],
+        "reporting": (
+            "both runs are reported side by side and run 1 stays as recorded. If run 2 aborts or "
+            "is unusable that is reported too, and no third run is made without a further "
+            "addendum."
+        ),
+    }
+]
+
 PREREGISTRATION: dict[str, Any] = {
     "version": PREREGISTRATION_VERSION,
     "frozen_before_live_calls": True,
@@ -233,6 +267,7 @@ PREREGISTRATION: dict[str, Any] = {
         {k: v for k, v in case.items() if k != "question"} | {"question": case["question"]}
         for case in CASES
     ],
+    "addenda": ADDENDA,
 }
 
 # --------------------------------------------------------------------------- checks

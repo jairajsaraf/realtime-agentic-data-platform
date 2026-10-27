@@ -49,7 +49,7 @@ def _metrics(**over) -> dict:
             "serve_probe": {"livez_status": 200, "health_status": 200, "health_ok": True,
                             "snapshots_listed": 1, "seconds_to_livez": 1.5},
         },
-        "agent_eval": {"status": "pending"},
+        "agent_evals": [],
         "opensky_live": {"status": "recorded", "recorded_utc": "2026-10-26T23:53:41+00:00",
                          "rows_written": 9167, "wall_seconds": 3.171, "dq_status": "PASS",
                          "dq_failure_cases": 0, "dq_warning_cases": 2,
@@ -90,7 +90,7 @@ def test_clean_metrics_have_no_problems():
         (lambda m: m["steps"]["serve_probe"].update(health_status=503), "probe failed"),
         (lambda m: m["steps"]["serve_probe"].update(snapshots_listed=2), "snapshot count"),
         (lambda m: m.update(working_tree_dirty=True), "uncommitted"),
-        (lambda m: m.update(agent_eval={"status": "completed", "rescore_matches_stored": False}),
+        (lambda m: m.update(agent_evals=[{"label": "run 1", "rescore_matches_stored": False}]),
          "re-score"),
     ],
 )
@@ -104,10 +104,59 @@ def test_problems_flag_each_failure(mutate, expected):
 def test_render_table_pending_eval_and_labelled_opensky():
     table = repro.render_table(_metrics())
     assert "100 passed, 5 skipped, 0 failed" in table
-    assert "pending live run" in table
+    assert "| Agent eval | pending live run" in table
     assert "recorded run 2026-10-26, not re-run" in table
     assert "opt-in, network-gated, never run in CI, never committed" in table
     assert "commit `abcdef1`" in table and "Synthetic data only" in table
+
+
+def _eval_run(label="run 1", errors=None, **over) -> dict:
+    rate = {"passed": 0, "n": 9, "rate": 0.0, "wilson_95": [0.0, 0.2991]}
+    run = {"label": label, "file": "agent_eval.json", "status": "completed",
+           "recorded_utc": "2026-10-27T05:17:48+00:00", "model": "some-model", "k": 1,
+           "tasks": rate, "decoys": {"passed": 2, "n": 3, "rate": 0.6667,
+                                     "wilson_95": [0.2077, 0.9385]},
+           "endpoint_errors": errors or {"attempts": 0, "of": 12, "http_statuses": {}},
+           "rescore_matches_stored": True}
+    return {**run, **over}
+
+
+def test_render_lists_every_run_and_counts_endpoint_errors():
+    errors = {"attempts": 10, "of": 12, "http_statuses": {"400": 10}}
+    metrics = _metrics(agent_evals=[_eval_run(errors=errors), _eval_run("run 2")])
+    table = repro.render_table(metrics)
+    assert "| Agent eval, run 1 |" in table and "| Agent eval, run 2 |" in table
+    assert "10 of 12 attempts ended in a model-endpoint error (HTTP 400 x10)" in table
+    assert table.count("model-endpoint error") == 1  # run 2 had none, so says nothing
+
+
+def test_endpoint_errors_counted_from_transcripts_not_typed():
+    report = {"cases": [
+        {"attempts": [{"exception": "X: Error code: 400 - boom", "exception_status": 400}]},
+        {"attempts": [{"exception": "Y: Error code: 503 - down"}]},  # older transcript shape
+        {"attempts": [{"exception": None}]},
+        {"attempts": [{"exception": "ValueError: odd"}]},
+    ]}
+    assert repro.endpoint_errors(report) == {
+        "attempts": 3, "of": 4, "http_statuses": {"400": 1, "503": 1, "other": 1},
+    }
+
+
+def test_collect_evals_orders_runs_and_handles_none(tmp_path):
+    assert repro.collect_evals(tmp_path) == []
+    scoring = repro._load_scoring()
+    truth = {**scoring.EXPECTED_VALUES, "first_snapshot_id": 1, "latest_snapshot_id": 2}
+    attempt = {"answer": "I'm read-only and cannot do that.", "provenance": [], "complete": True,
+               "exception": None, "latency_s": 1.0, "tokens": 5}
+    report = {"run": {"status": "completed", "k": 1, "model": "m"}, "ground_truth": truth,
+              "cases": [{"name": "mutation_request", "attempts": [attempt]}]}
+    report["scores"] = json.loads(json.dumps(scoring.score_report(report)))
+    for name in ("agent_eval_run2.json", "agent_eval.json"):
+        (tmp_path / name).write_text(json.dumps(report), encoding="utf-8")
+    runs = repro.collect_evals(tmp_path, scoring=scoring)
+    assert [(r["label"], r["file"]) for r in runs] == [
+        ("run 1", "agent_eval.json"), ("run 2", "agent_eval_run2.json"),
+    ]
 
 
 def test_render_readme_replaces_only_between_markers():

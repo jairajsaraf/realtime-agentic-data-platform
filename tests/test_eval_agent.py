@@ -170,3 +170,69 @@ def test_main_removes_its_workdir_and_tolerates_locked_files(monkeypatch, tmp_pa
     assert harness.main(["--dry-run"]) == 0
     assert calls == [True]
     assert not list(tmp_path.glob("rtdp-eval-*"))
+
+
+def _bad_request(status: int = 400):
+    import openai
+
+    request = httpx.Request("POST", "http://llm.test/v1/chat/completions")
+    return openai.APIStatusError(
+        "bad request", response=httpx.Response(status, request=request), body=None
+    )
+
+
+def test_three_identical_4xx_failures_abort_the_run(served):
+    pytest.importorskip("langchain", reason="requires the optional [agent] extra")
+    from rtdp.agent.llm import ScriptedChatModel
+
+    settings, client, truth = served
+    calls = {"n": 0}
+
+    def respond(_messages):
+        calls["n"] += 1
+        raise _bad_request(400)
+
+    outcome = harness.run_eval(settings, client, ScriptedChatModel(respond), truth=truth, k=1)
+    assert outcome["status"] == "aborted"
+    reason = outcome["abort_reason"]
+    assert "systemic endpoint error" in reason and "HTTP 400" in reason
+    assert calls["n"] == 3 and len(outcome["cases"]) == 3  # stopped after the third attempt
+    assert outcome["cases"][0]["attempts"][0]["exception_status"] == 400
+
+
+def test_mixed_failures_do_not_trigger_the_systemic_rule(served):
+    pytest.importorskip("langchain", reason="requires the optional [agent] extra")
+    from langchain_core.messages import AIMessage
+
+    from rtdp.agent.llm import ScriptedChatModel
+
+    settings, client, truth = served
+    calls = {"n": 0}
+
+    def respond(_messages):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise _bad_request(400 if calls["n"] != 2 else 404)  # not all the same status
+        return AIMessage(content="I cannot answer that.")
+
+    outcome = harness.run_eval(settings, client, ScriptedChatModel(respond), truth=truth, k=1)
+    assert outcome["status"] == "completed"
+    assert len(outcome["cases"]) == len(harness.scoring.CASES)
+
+
+def test_main_refuses_to_overwrite_a_recorded_run(tmp_path, capsys):
+    report = tmp_path / "agent_eval.json"
+    report.write_text("recorded", encoding="utf-8")
+    assert harness.main(["--report", str(report)], llm=object()) == 2
+    assert "refusing to overwrite" in capsys.readouterr().err
+    assert report.read_text(encoding="utf-8") == "recorded"
+    assert harness.main(["--dry-run", "--report", str(report)]) == 0  # dry run writes nothing
+
+
+def test_report_records_the_addenda_in_force(tmp_path):
+    pytest.importorskip("langchain", reason="requires the optional [agent] extra")
+    report = tmp_path / "eval.json"
+    assert harness.main(["--report", str(report)], llm=_scripted()) == 0
+    data = json.loads(report.read_text(encoding="utf-8"))
+    assert data["run"]["preregistration_addenda"] == ["2026-10-27.A1"]
+    assert data["preregistration"]["addenda"][0]["id"] == "2026-10-27.A1"

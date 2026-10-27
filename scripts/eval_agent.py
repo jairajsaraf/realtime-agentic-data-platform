@@ -25,6 +25,7 @@ import argparse
 import gc
 import json
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -125,6 +126,10 @@ def check_frozen(truth: dict) -> list[str]:
 # --------------------------------------------------------------------------- run
 
 
+# Addendum 2026-10-27.A1: abort when the first attempts all fail with the same non-quota HTTP 4xx.
+SYSTEMIC_ATTEMPTS = 3
+
+
 class AbortRun(Exception):
     """A preregistered stop rule fired (quota/rate limit or auth)."""
 
@@ -139,6 +144,26 @@ def is_abort_error(exc: BaseException) -> bool:
         "AuthenticationError",
         "PermissionDeniedError",
     )
+
+
+def _http_status(exc: BaseException) -> int | None:
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status
+    match = re.search(r"Error code: (\d{3})", str(exc))
+    return int(match[1]) if match else None
+
+
+def _check_systemic(cases: list[dict]) -> None:
+    """Stop rule (addendum A1): the first 3 attempts all failed with one non-quota HTTP 4xx."""
+    first = [a for entry in cases for a in entry["attempts"]]
+    if len(first) != SYSTEMIC_ATTEMPTS or not all(a.get("exception") for a in first):
+        return
+    statuses = {a.get("exception_status") for a in first}
+    status = next(iter(statuses))
+    if len(statuses) == 1 and status is not None and 400 <= status < 500:
+        raise AbortRun(f"systemic endpoint error: the first {SYSTEMIC_ATTEMPTS} attempts all "
+                       f"failed with HTTP {status}")
 
 
 def _short(exc: BaseException) -> str:
@@ -169,6 +194,7 @@ def run_case(question: str, *, settings, llm, executor, tools) -> dict:
             "answer": "", "provenance": [], "tool_calls": tool_calls, "turns": None,
             "complete": False, "error": None, "tokens": None,
             "latency_s": round(time.perf_counter() - start, 3), "exception": _short(exc),
+            "exception_status": _http_status(exc),
         }
     return {
         "answer": result.answer,
@@ -181,6 +207,7 @@ def run_case(question: str, *, settings, llm, executor, tools) -> dict:
         "tokens": result.tokens,
         "latency_s": round(time.perf_counter() - start, 3),
         "exception": None,
+        "exception_status": None,
     }
 
 
@@ -204,6 +231,7 @@ def run_eval(settings, client, llm, *, truth: dict, k: int, pause_s: float = 0.0
                 entry["attempts"].append(
                     run_case(question, settings=settings, llm=llm, executor=executor, tools=tools)
                 )
+                _check_systemic(cases)
             if pause_s and index < len(scoring.CASES) - 1:
                 time.sleep(pause_s)
     except AbortRun as exc:
@@ -275,6 +303,7 @@ def run_metadata(settings, *, k: int, pause_s: float) -> dict:
         "python": platform.python_version(),
         "packages": _versions(),
         "data": "synthetic only",
+        "preregistration_addenda": [a["id"] for a in scoring.ADDENDA],
     }
 
 
@@ -337,6 +366,10 @@ def main(argv: list[str] | None = None, *, llm=None) -> int:
                         help="pause between cases (rate-limit pacing; not counted in latency)")
     args = parser.parse_args(argv)
     k = scoring.PREREGISTRATION["k"]
+    if not args.dry_run and args.report.exists():
+        print(f"{args.report} already exists; refusing to overwrite a recorded run. Write a new "
+              "run to a new --report path.", file=sys.stderr)
+        return 2
 
     workdir = Path(tempfile.mkdtemp(prefix="rtdp-eval-"))
     try:

@@ -159,3 +159,23 @@ def test_score_report_and_bars():
     assert summary["latency_s"]["p50"] == 1.0 and summary["latency_s"]["p95"] == 3.0
     assert summary["tokens"] == {"total": 20, "mean_per_attempt": 10.0, "attempts_with_usage": 2}
     assert summary["pass_hat_k"]["passed"] == 2
+
+
+# ------------------------------------------------------------------ addenda + recorded runs
+def test_addendum_is_dated_and_leaves_the_frozen_rules_alone():
+    (addendum,) = scoring.PREREGISTRATION["addenda"]
+    assert addendum["id"] == "2026-10-27.A1" and addendum["written_before"] == "run 2"
+    assert "unchanged" in addendum and "reporting" in addendum
+    # The frozen run-1 fields are still what run 1 was scored against.
+    assert scoring.PREREGISTRATION["version"] == "2026-10-26.1"
+    assert scoring.PREREGISTRATION["k"] == 1
+    assert len(scoring.PREREGISTRATION["stop_rules"]) == 4
+
+
+def test_recorded_run_1_still_rescores_to_its_stored_scores():
+    """Guards the preregistration: scoring must not drift after a result is recorded."""
+    path = Path(__file__).resolve().parents[1] / "results" / "agent_eval.json"
+    if not path.exists():
+        pytest.skip("no recorded run in this checkout")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    assert json.loads(json.dumps(scoring.score_report(report))) == report["scores"]

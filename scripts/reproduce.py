@@ -225,6 +225,8 @@ def step_rescore_eval(path: Path = EVAL_PATH, *, scoring=None) -> dict:
         "commit_sha": run.get("commit_sha"),
         "k": run.get("k"),
         "rescore_matches_stored": rescored == report.get("scores"),
+        "endpoint_errors": endpoint_errors(report),
+        "addenda": run.get("preregistration_addenda", []),
         "tasks": summary["tasks"],
         "decoys": summary["decoys"],
         "tool_correctness": summary["tool_correctness"],
@@ -234,6 +236,32 @@ def step_rescore_eval(path: Path = EVAL_PATH, *, scoring=None) -> dict:
         "bars": summary["bars"],
         "note": "recorded run, re-scored offline from its stored transcripts; not re-run",
     }
+
+
+_STATUS = re.compile(r"Error code: (\d{3})")
+
+
+def endpoint_errors(report: dict) -> dict:
+    """Attempts that ended in a model-endpoint error, counted from the stored transcripts."""
+    attempts = [a for case in report.get("cases", []) for a in case.get("attempts", [])]
+    failed = [a for a in attempts if a.get("exception")]
+    statuses: dict[str, int] = {}
+    for attempt in failed:
+        status = attempt.get("exception_status")
+        if status is None and (match := _STATUS.search(attempt["exception"])):
+            status = int(match[1])
+        key = str(status) if status is not None else "other"
+        statuses[key] = statuses.get(key, 0) + 1
+    return {"attempts": len(failed), "of": len(attempts), "http_statuses": statuses}
+
+
+def collect_evals(results_dir: Path = RESULTS_DIR, *, scoring=None) -> list[dict]:
+    """Every recorded eval run (results/agent_eval*.json, oldest name first), re-scored offline."""
+    runs = []
+    for index, path in enumerate(sorted(results_dir.glob("agent_eval*.json")), start=1):
+        summary = step_rescore_eval(path, scoring=scoring)
+        runs.append({"label": f"run {index}", "file": path.name, **summary})
+    return runs
 
 
 def read_opensky(path: Path = OPENSKY_PATH) -> dict:
@@ -282,7 +310,7 @@ def collect() -> dict:
                     "cpu_count": os.cpu_count()},
         "data": "synthetic only",
         "steps": steps,
-        "agent_eval": step_rescore_eval(),
+        "agent_evals": collect_evals(),
         "opensky_live": read_opensky(),
     }
 
@@ -309,9 +337,10 @@ def problems(metrics: dict) -> list[str]:
         found.append("the aborted batch changed the snapshot count")
     if metrics["working_tree_dirty"]:
         found.append("working tree has uncommitted changes outside results/")
-    evaluation = metrics["agent_eval"]
-    if evaluation.get("status") != "pending" and not evaluation.get("rescore_matches_stored"):
-        found.append("agent eval re-score does not match the stored scores")
+    for evaluation in metrics["agent_evals"]:
+        if not evaluation.get("rescore_matches_stored"):
+            found.append(f"agent eval {evaluation['label']} re-score does not match the stored "
+                         "scores")
     return found
 
 
@@ -341,18 +370,21 @@ def render_table(metrics: dict) -> str:
         ("Read API", f"/livez {serve['livez_status']} after {serve['seconds_to_livez']} s, "
                      f"/health {serve['health_status']}, {serve['snapshots_listed']} snapshot(s)"),
     ]
-    evaluation = metrics["agent_eval"]
-    if evaluation.get("status") == "pending":
+    evals = metrics["agent_evals"]
+    if not evals:
         rows.append(("Agent eval", "pending live run; the harness and preregistration are "
                                    "committed"))
-    else:
+    for evaluation in evals:
         when = str(evaluation["recorded_utc"])[:10]
-        rows.append((
-            "Agent eval",
-            f"{evaluation['model']}, {when}, k={evaluation['k']}, status {evaluation['status']}: "
-            f"tasks {_pct(evaluation['tasks'])}, decoys {_pct(evaluation['decoys'])} "
-            "(recorded run, re-scored offline)",
-        ))
+        text = (f"{evaluation['model']}, {when}, k={evaluation['k']}, status "
+                f"{evaluation['status']}: tasks {_pct(evaluation['tasks'])}, decoys "
+                f"{_pct(evaluation['decoys'])}")
+        errors = evaluation["endpoint_errors"]
+        if errors["attempts"]:
+            codes = ", ".join(f"HTTP {k} x{v}" for k, v in sorted(errors["http_statuses"].items()))
+            text += (f"; {errors['attempts']} of {errors['of']} attempts ended in a model-endpoint "
+                     f"error ({codes}) and count as failures")
+        rows.append((f"Agent eval, {evaluation['label']}", text + " (recorded, re-scored offline)"))
     sky = metrics["opensky_live"]
     if sky.get("status") == "recorded":
         rows.append((

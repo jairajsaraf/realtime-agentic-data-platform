@@ -3,6 +3,11 @@
 Local, additive deploy assets for running the existing `rtdp` surfaces from one Docker image on
 a single host. **Nothing here provisions cloud resources or contains real secrets.**
 
+> **Status: portable VM path; host retired.** The single-host topology described below ran on one
+> DigitalOcean droplet that is no longer running, so nothing in this folder is currently deployed
+> from it. The files stay as a portable VM path. The public demo is now the Hugging Face Space in
+> `hf-space/` (synthetic data only), deployed by the `deploy-space` CI job.
+
 - `Dockerfile` (repo root) — one image; entrypoint is the `rtdp` CLI.
 - `docker-compose.yml` — `api` (read API, always on) + `stream` (micro-batch writer, **opt-in via the
   `ingestion` profile**), a one-shot `maintain` profile, an `s3` profile (MinIO object storage), an
@@ -11,7 +16,9 @@ a single host. **Nothing here provisions cloud resources or contains real secret
 - `Caddyfile` — Caddy site config; reverse-proxies the public hostname to the `api` service.
 - `bootstrap_host.sh` — idempotent host prep (Docker, deploy user, UFW). Run once on a new host.
 - `host_deploy.sh` — the host-side deploy action (compose pull + up + `/livez` liveness check) the
-  gated CI deploy job invokes over SSH.
+  retired SSH deploy job invoked.
+- `hf-space/` — the Hugging Face Space (`app.py`, `requirements.txt`, the Space's own `README.md`) and
+  the `deploy.sh` that the `deploy-space` CI job runs to push it.
 - `.env.example` — placeholder environment; copy to a local, gitignored `.env` or inject via a
   secrets manager. Never commit a real `.env`.
 
@@ -151,8 +158,8 @@ All runtime config flows through the existing `RTDP_*` settings. Two equivalent 
 
 **Secret boundary:**
 
-- **GitHub `production` environment secrets** hold **only the SSH deploy credentials**
-  (`DEPLOY_SSH_HOST`, `DEPLOY_SSH_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_SSH_PATH`) used by the deploy job.
+- **GitHub `production` environment secrets** hold **only the Space deploy token** (`HF_TOKEN`) used
+  by the `deploy-space` job. (The SSH deploy credentials of the retired VM host are no longer used.)
 - **Doppler** (on the host) injects the **app/runtime `RTDP_*`** secrets (plus `DD_API_KEY` and the
   MinIO/AWS credentials) into the containers via `doppler run -- docker compose ...`.
 
@@ -167,15 +174,17 @@ docker compose -f deploy/docker-compose.yml run --rm maintain
 One-shot, metadata-only snapshot expiration. On a host, schedule via cron/systemd-timer so it does
 not overlap a `stream` commit.
 
-> Note: the droplet, MinIO volume, Doppler/Datadog accounts, and DNS are **provisioned and the demo is
-> deployed live** (E6.2–E6.3) — see the "Stage E6 — single-host go-live" and teardown sections of
-> `RUNBOOK.md`. These repo files still **contain no real secrets**; runtime config is injected on the
-> host (Doppler) and the CI deploy credentials live in the GitHub `production` environment.
+> Note: the droplet, MinIO volume, Doppler/Datadog accounts, and DNS were provisioned and the demo ran
+> on that host (E6.2–E6.3); the host is now **retired**. See the "Stage E6 — single-host go-live" and
+> teardown sections of `RUNBOOK.md` for how it was set up. These repo files still **contain no real
+> secrets**; runtime config was injected on the host (Doppler), and CI deploy credentials live in the
+> GitHub `production` environment.
 
 ## CI/CD
 
-GitHub Actions (`.github/workflows/ci.yml`) validates the image and, on `main`, publishes it.
-Image validation is kept separate from publishing, and publishing separate from deployment.
+GitHub Actions (`.github/workflows/ci.yml`) validates the image, publishes it on `main`, and deploys
+the demo Space on `main`. Image validation is kept separate from publishing, and publishing separate
+from deployment.
 
 - **`docker-smoke`** (every push + PR) — builds the image and runs `scripts/docker_smoke.sh`
   (file:// synthetic seed → `rtdp serve` → `/health` 200) plus a `docker compose config`
@@ -187,32 +196,40 @@ Image validation is kept separate from publishing, and publishing separate from 
 - **`publish-image`** (push to `main` only; needs lint/unit + telemetry-otel + LocalStack integration + smoke) —
   builds and pushes `ghcr.io/<owner>/<repo>:<sha>` and `:latest` using the built-in
   `GITHUB_TOKEN` (`packages: write`). No external/cloud secret.
-- **`deploy`** (push to `main` only; needs lint/unit + LocalStack + smoke + `publish-image`;
-  `environment: production`) — a **real, gated SSH deploy**. Raw OpenSSH (no third-party action):
-  writes `DEPLOY_SSH_KEY` to a 0600 temp file, pins the host key with `ssh-keyscan`, and runs exactly
-  one remote command — `bash "$DEPLOY_SSH_PATH/deploy/host_deploy.sh"` (compose pull + up + `/livez`
-  liveness check). It passes the approved commit as `RTDP_DEPLOY_EXPECTED_SHA=$GITHUB_SHA`, so the host aborts
-  before compose if its checkout is stale (see "Checkout alignment" below). No secrets are printed; it
-  runs only after a human approves the `production` environment.
+- **`deploy-space`** (push to `main` only; needs lint/unit + LocalStack + smoke;
+  `environment: production`) — pushes `deploy/hf-space/` to the Hugging Face Space with plain git, no
+  third-party action. `deploy/hf-space/deploy.sh` stages the Space files, replaces the
+  `__RTDP_COMMIT_SHA__` placeholder in `requirements.txt` with the commit being deployed, and does a
+  normal fast-forward push (never forced). The token is sent as an HTTP basic-auth header through
+  environment variables, so it never appears in a command line. It runs only after a human approves
+  the `production` environment. It does not verify that the Space came up: the build runs on Hugging
+  Face after the push, so check the Space's `/health` yourself before advertising a URL.
+- The earlier SSH `deploy` job, which targeted the retired VM host, was removed. `host_deploy.sh` and
+  `bootstrap_host.sh` remain for the portable VM path below.
 
 ### Required GitHub settings (manual; not automated here)
 - Create a **`production` Environment** with **required reviewers** and restrict deployment branches
   to `main`. The deploy job waits for a reviewer's approval before it runs.
-- Add the `production` **environment secrets**: `DEPLOY_SSH_HOST`, `DEPLOY_SSH_USER`,
-  `DEPLOY_SSH_KEY` (the private key), `DEPLOY_SSH_PATH` (the repo/deploy path on the host).
-- **Recommended:** also add `DEPLOY_SSH_KNOWN_HOSTS` — the host's pinned `known_hosts` entry. When
-  set, the deploy verifies the host key against it; otherwise it falls back to in-band `ssh-keyscan`
-  (trust-on-first-use) with a warning. Capture/pin it out-of-band in E6.2.
-- GHCR packages are **private by default**; make the package public only if the demo image should be
-  anonymously pullable (otherwise ensure the host can authenticate to pull it).
-- No other repository secrets are required beyond the existing `CODECOV_TOKEN`.
+- Add the `production` **environment secret** `HF_TOKEN`: a Hugging Face **fine-grained** token with
+  write access to the one Space only (Hugging Face recommends fine-grained tokens for production).
+- Add the `production` **environment variable** `HF_SPACE_ID` (`owner/name` of the Space). Optionally
+  add `HF_USERNAME` (the account the token belongs to; defaults to the owner part of `HF_SPACE_ID`).
+- GHCR packages are **private by default**; make the package public only if the image should be
+  anonymously pullable.
+- No other repository secrets are required beyond the existing `CODECOV_TOKEN`. The old
+  `DEPLOY_SSH_*` secrets are no longer used and can be deleted.
 
 ### Manual approval flow
 The deploy job is wired but **gated**: on a push to `main` it queues against the `production`
 environment and does nothing until a required reviewer approves it in the GitHub UI
-(**Actions → the run → Review deployments → Approve**). On approval it SSHes to the host and runs
-`host_deploy.sh`; the job **fails if the post-deploy `/livez` liveness check fails**. Nothing deploys
-from a PR or a feature branch, and CI provisions no infrastructure.
+(**Actions → the run → Review deployments → Approve**). Nothing deploys from a PR or a feature
+branch, and CI provisions no infrastructure.
+
+## Portable VM path (host retired)
+
+The rest of this file's CI notes describe the SSH deploy that CI no longer runs. They apply only if
+you wire your own SSH deploy to a new host: `host_deploy.sh` and `bootstrap_host.sh` still work for
+that, and `docker-smoke` still checks them.
 
 ### Checkout alignment (host must match the approved commit)
 `host_deploy.sh` deploys the compose file and mounted config (`docker-compose.yml`,
@@ -236,6 +253,8 @@ git status --short               # expect clean
 ```
 
 ## Teardown
+
+(The host is already retired; this section is kept for anyone redeploying the VM path.)
 
 Full teardown and cost control are documented in `RUNBOOK.md` ("Teardown & cost control"). Two things
 to do **first**, before the host goes away: remove the **Live demo** callout from the repo `README.md`

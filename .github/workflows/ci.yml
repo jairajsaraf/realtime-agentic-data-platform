@@ -269,117 +269,25 @@ jobs:
           docker push "${{ steps.ref.outputs.image }}:${{ github.sha }}"
           docker push "${{ steps.ref.outputs.image }}:latest"
 
-  # Real, gated deploy. Runs ONLY on a push to `main`, behind the protected `production`
-  # environment (configure required reviewers there for manual approval), and only after the image
-  # is published. Uses raw OpenSSH — no third-party action ever handles the key: the private key is
-  # written to a 0600 temp file; the host key is verified against the pinned DEPLOY_SSH_KNOWN_HOSTS
-  # secret when set (else a warned-about ssh-keyscan fallback); the deploy path + the approved
-  # commit's SHA-pinned image are passed as positional args to the reviewed host script
-  # (deploy/host_deploy.sh), which runs `docker compose pull && up -d` plus a post-deploy /health
-  # check and exits non-zero on failure. Secrets come from the `production` environment, never echoed.
-  deploy:
-    name: deploy (gated)
+  # Deploy the read-only demo Space. Runs ONLY on a push to `main`, behind the protected
+  # `production` environment (configure required reviewers there for manual approval). Replaces the
+  # SSH deploy to the retired VM host. Plain git, no third-party action: deploy/hf-space/deploy.sh
+  # stages the Space files, fills the commit placeholder in requirements.txt, and fast-forward pushes
+  # them to the Space. HF_TOKEN must be a fine-grained token with write access to that one Space.
+  deploy-space:
+    name: deploy (Hugging Face Space)
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [test, integration-localstack, docker-smoke, publish-image]
+    needs: [test, integration-localstack, docker-smoke]
     permissions:
       contents: read
     environment: production
     steps:
-      - name: Deploy over SSH (host runs compose pull + up + /health check)
+      - uses: actions/checkout@v4
+      - name: Push deploy/hf-space/ to the Space
         env:
-          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
-          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_SSH_PATH: ${{ secrets.DEPLOY_SSH_PATH }}
-          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
-          # Deterministic digest-pinned deploy plumbing (Session-1 P0). All NON-SECRET, environment-level
-          # `production` variables, unset by default → normal mode (registry pull; behavior unchanged).
-          # RUNTIME_IMAGE_DIGEST overrides the runtime app image with a digest ref (runtime identity,
-          # separate from the deployment/checkout identity $GITHUB_SHA); the four third-party digests pin
-          # minio/mc/caddy/datadog. local-pinned requires all five to be exact digest refs.
-          DEPLOY_MODE: ${{ vars.RTDP_DEPLOY_MODE }}
-          RUNTIME_IMAGE_DIGEST: ${{ vars.RTDP_RUNTIME_IMAGE_DIGEST }}
-          MINIO_IMG: ${{ vars.RTDP_MINIO_IMAGE }}
-          MC_IMG: ${{ vars.RTDP_MINIO_MC_IMAGE }}
-          CADDY_IMG: ${{ vars.RTDP_CADDY_IMAGE }}
-          DD_IMG: ${{ vars.RTDP_DATADOG_IMAGE }}
-        run: |
-          set -euo pipefail
-          umask 077
-          key_file="$(mktemp)"
-          known_hosts="$(mktemp)"
-          trap 'rm -f "$key_file" "$known_hosts"' EXIT
-          # Private key -> 0600 temp file. mktemp already creates it 0600 under umask 077; chmod is
-          # explicit. The key is read from the env (masked) and never printed.
-          printf '%s\n' "$DEPLOY_SSH_KEY" > "$key_file"
-          chmod 600 "$key_file"
-          # Prefer an out-of-band pinned host key (DEPLOY_SSH_KNOWN_HOSTS). Fall back to in-band
-          # ssh-keyscan (trust-on-first-use) with a warning when it is unset — pin it in E6.2.
-          if [ -n "${DEPLOY_SSH_KNOWN_HOSTS:-}" ]; then
-            printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$known_hosts"
-          else
-            echo "WARNING: DEPLOY_SSH_KNOWN_HOSTS is unset; falling back to in-band ssh-keyscan (TOFU). Pin it in E6.2." >&2
-            ssh-keyscan -H "$DEPLOY_SSH_HOST" > "$known_hosts"
-          fi
-          # Runtime application image (RUNTIME identity — separate from the deployment/checkout identity
-          # $GITHUB_SHA). When RUNTIME_IMAGE_DIGEST is set (local-pinned), deploy that exact digest ref;
-          # otherwise deploy the APPROVED commit's immutable image (publish-image pushed :$GITHUB_SHA) —
-          # never :latest, which a queued/approved run could resolve to a newer commit.
-          image_ref="${RUNTIME_IMAGE_DIGEST:-ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]'):${GITHUB_SHA}}"
-          # Pass the deploy path, image ref, approved SHA, deploy mode, and the four third-party image
-          # refs as POSITIONAL parameters ($1..$8) to a fixed remote script read from stdin (bash -s) —
-          # they are consumed as "$1".."$8", never interpolated into a command, so a value containing
-          # quotes/backticks/$() is literal, not evaluated. printf %q only escapes them for safe transport
-          # through ssh's single-string re-parse. No eval. Empty vars (normal mode) transport as '' and
-          # are ignored downstream. The mode + image refs are NON-SECRET (environment-level vars).
-          ssh -i "$key_file" \
-            -o IdentitiesOnly=yes \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes \
-            -o UserKnownHostsFile="$known_hosts" \
-            "$DEPLOY_SSH_USER@$DEPLOY_SSH_HOST" \
-            "bash -s -- $(printf '%q' "$DEPLOY_SSH_PATH") $(printf '%q' "$image_ref") $(printf '%q' "$GITHUB_SHA") $(printf '%q' "${DEPLOY_MODE:-normal}") $(printf '%q' "$MINIO_IMG") $(printf '%q' "$MC_IMG") $(printf '%q' "$CADDY_IMG") $(printf '%q' "$DD_IMG")" <<'REMOTE'
-          set -euo pipefail
-          deploy_path="$1"
-          image_ref="$2"
-          expected_sha="$3"
-          deploy_mode="$4"
-          minio_img="$5"
-          mc_img="$6"
-          caddy_img="$7"
-          dd_img="$8"
-          cd "$deploy_path"
-          # Authoritative checkout-alignment guard — runs from the approved stdin wrapper, so it is
-          # enforced even if the host's own deploy/host_deploy.sh is stale (Codex PR #10 P1). Verify-only:
-          # no git fetch/checkout, no self-heal.
-          if ! host_sha="$(git rev-parse HEAD 2>/dev/null)"; then
-            echo "ERROR: $deploy_path is not a git checkout; cannot verify deploy alignment." >&2
-            exit 1
-          fi
-          if [ "$host_sha" != "$expected_sha" ]; then
-            echo "ERROR: host checkout $host_sha does not match the approved commit $expected_sha." >&2
-            echo "       Advance $deploy_path to the approved commit out-of-band (git fetch + checkout), then re-run." >&2
-            exit 1
-          fi
-          # Reject a dirty worktree — a matching HEAD with local edits would still deploy unapproved
-          # config (Codex PR #10 P2). --porcelain catches tracked edits AND untracked files; it ignores
-          # gitignored files (e.g. a host .env). Fail closed if the status command itself fails, and do
-          # not print the file list (avoid leaking filenames into Actions logs).
-          if ! dirty_status="$(git status --porcelain)"; then
-            echo "ERROR: failed to inspect host checkout worktree state." >&2
-            exit 1
-          fi
-          if [ -n "$dirty_status" ]; then
-            echo "ERROR: host checkout has uncommitted or untracked changes; refusing to deploy." >&2
-            exit 1
-          fi
-          # Pass the runtime image (RTDP_IMAGE) + checkout-alignment SHA + the Session-1 P0 deploy-mode
-          # controls to the reviewed host script. All non-secret; empty (normal-mode default) values are
-          # ignored by host_deploy.sh and Compose falls back to the existing tag defaults.
-          RTDP_IMAGE="$image_ref" RTDP_DEPLOY_EXPECTED_SHA="$expected_sha" \
-            RTDP_DEPLOY_MODE="$deploy_mode" \
-            RTDP_MINIO_IMAGE="$minio_img" RTDP_MINIO_MC_IMAGE="$mc_img" \
-            RTDP_CADDY_IMAGE="$caddy_img" RTDP_DATADOG_IMAGE="$dd_img" \
-            bash deploy/host_deploy.sh
-          REMOTE
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_ID: ${{ vars.HF_SPACE_ID }}
+          HF_USERNAME: ${{ vars.HF_USERNAME }}
+          RTDP_DEPLOY_SHA: ${{ github.sha }}
+        run: bash deploy/hf-space/deploy.sh

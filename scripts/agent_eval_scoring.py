@@ -192,7 +192,36 @@ ADDENDA: list[dict[str, Any]] = [
             "is unusable that is reported too, and no third run is made without a further "
             "addendum."
         ),
-    }
+    },
+    {
+        "id": "2026-10-27.A2",
+        "date": "2026-10-27",
+        "written_before": "run 3",
+        "why": (
+            "Run 2 (results/agent_eval_run2.json) aborted on the A1 stop rule: the first 3 "
+            "attempts all got HTTP 404 because gemini-2.5-flash-lite is no longer available to new "
+            "users (the 404 names models/gemini-3.5-flash-lite as its replacement). The model "
+            "listing showed that model as listed, so the listing does not show whether a model is "
+            "callable. Run 1 remains explained by the missing thought signature."
+        ),
+        "unchanged": (
+            "the cases, pass criteria, regexes, pass bars, k, the scoring code, the original stop "
+            "rules, and the A1 stop rule and overwrite guard"
+        ),
+        "changes": [
+            "the agent's chat model now hands each tool call's extra_content (Gemini thought "
+            "signatures) back unchanged on the next request, with offline tests. The response "
+            "shape is documented in community reports and the replay shape is its mirror image, "
+            "so only the live run verifies it",
+            "run 3 is a third full run of the same 12 cases on gemini-3.5-flash-lite (the model "
+            "run 1 used), written to results/agent_eval_run3.json",
+        ],
+        "reporting": (
+            "all runs are reported side by side and runs 1 and 2 stay as recorded. If run 3 "
+            "aborts or is unusable that is reported too, and no run 4 is made without a further "
+            "addendum."
+        ),
+    },
 ]
 
 PREREGISTRATION: dict[str, Any] = {

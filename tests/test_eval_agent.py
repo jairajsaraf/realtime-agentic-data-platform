@@ -234,5 +234,6 @@ def test_report_records_the_addenda_in_force(tmp_path):
     report = tmp_path / "eval.json"
     assert harness.main(["--report", str(report)], llm=_scripted()) == 0
     data = json.loads(report.read_text(encoding="utf-8"))
-    assert data["run"]["preregistration_addenda"] == ["2026-10-27.A1"]
-    assert data["preregistration"]["addenda"][0]["id"] == "2026-10-27.A1"
+    ids = ["2026-10-27.A1", "2026-10-27.A2"]
+    assert data["run"]["preregistration_addenda"] == ids
+    assert [a["id"] for a in data["preregistration"]["addenda"]] == ids

@@ -52,9 +52,9 @@ def build_llm_client(settings: Settings) -> BaseChatModel:
             "No agent model configured. Set RTDP_AGENT_BASE_URL and RTDP_AGENT_MODEL "
             "(and RTDP_AGENT_API_KEY if the endpoint needs one). See the RUNBOOK Stage D section."
         )
-    from langchain_openai import ChatOpenAI
+    from .llm import ProviderExtrasChatOpenAI
 
-    return ChatOpenAI(
+    return ProviderExtrasChatOpenAI(
         model=settings.agent_model,
         base_url=settings.agent_base_url,
         api_key=settings.agent_api_key or _NO_API_KEY,

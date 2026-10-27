@@ -163,9 +163,11 @@ def test_score_report_and_bars():
 
 # ------------------------------------------------------------------ addenda + recorded runs
 def test_addendum_is_dated_and_leaves_the_frozen_rules_alone():
-    (addendum,) = scoring.PREREGISTRATION["addenda"]
-    assert addendum["id"] == "2026-10-27.A1" and addendum["written_before"] == "run 2"
-    assert "unchanged" in addendum and "reporting" in addendum
+    first, second = scoring.PREREGISTRATION["addenda"]
+    assert (first["id"], first["written_before"]) == ("2026-10-27.A1", "run 2")
+    assert (second["id"], second["written_before"]) == ("2026-10-27.A2", "run 3")
+    for addendum in (first, second):
+        assert "unchanged" in addendum and "reporting" in addendum
     # The frozen run-1 fields are still what run 1 was scored against.
     assert scoring.PREREGISTRATION["version"] == "2026-10-26.1"
     assert scoring.PREREGISTRATION["k"] == 1

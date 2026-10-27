@@ -14,7 +14,7 @@ pytest.importorskip("langchain", reason="requires the optional [agent] extra")
 from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
 from langchain_openai import ChatOpenAI  # noqa: E402
 
-from rtdp.agent.llm import ScriptedChatModel  # noqa: E402
+from rtdp.agent.llm import ProviderExtrasChatOpenAI, ScriptedChatModel  # noqa: E402
 from rtdp.agent.loop import run_agent  # noqa: E402
 from rtdp.agent.runtime import build_llm_client  # noqa: E402
 from rtdp.agent.tools import ToolResult, static_registry  # noqa: E402
@@ -177,3 +177,106 @@ def test_chat_openai_wire_shape_and_bad_json_tool_args_degrade(monkeypatch):
     assert result.answer == "The box was missing."
     assert result.tokens == 29
     assert result.citation_line() == "Sources: GET /flights/bbox"
+
+
+# ------------------------------------------------------------------ provider extras round-trip
+_SIG = {"google": {"thought_signature": "c2lnbmF0dXJl"}}
+
+
+def _tool_call(call_id: str, name: str, extra: dict | None = None) -> dict:
+    call = {"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}
+    if extra is not None:
+        call["extra_content"] = extra
+    return call
+
+
+def _scripted_endpoint(first_message: dict):
+    """A mocked chat endpoint: first reply is `first_message`, the second is a final answer.
+
+    Like Gemini 3, it answers HTTP 400 when a replayed assistant tool call lacks its signature.
+    """
+    requests: list[dict] = []
+    replies = iter([first_message, {"role": "assistant", "content": "done"}])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        for message in body["messages"]:
+            for call in message.get("tool_calls") or []:
+                if call["id"] == "sig-call" and call.get("extra_content") != _SIG:
+                    return httpx.Response(400, json={"error": {
+                        "code": 400,
+                        "message": "Function call is missing a thought_signature in functionCall "
+                                   "parts."}})
+        return httpx.Response(200, json=_completion(next(replies), total_tokens=5))
+
+    return requests, httpx.Client(transport=httpx.MockTransport(handler))
+
+
+class _Executor:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, name, arguments):
+        self.calls.append(name)
+        return ToolResult(name, f"GET /{name}", arguments, ok=True, snapshot_id=1, data={})
+
+
+def _run(model, executor):
+    return run_agent("q", llm=model, executor=executor, tools=static_registry().definitions())
+
+
+def _model(http_client, cls=ProviderExtrasChatOpenAI):
+    return cls(model="m", base_url="http://llm.test/v1", api_key="k", max_retries=0,
+               http_client=http_client)
+
+
+def test_extra_content_is_replayed_on_the_next_request():
+    first = {"role": "assistant", "content": None,
+             "tool_calls": [_tool_call("sig-call", "flights", _SIG)]}
+    requests, client = _scripted_endpoint(first)
+    executor = _Executor()
+    result = _run(_model(client), executor)
+
+    assert result.answer == "done" and executor.calls == ["flights"]
+    replayed = [m for m in requests[1]["messages"] if m["role"] == "assistant"][0]
+    assert replayed["tool_calls"][0]["extra_content"] == _SIG
+    # The first request has nothing to replay yet.
+    assert not any("extra_content" in str(m) for m in requests[0]["messages"])
+
+
+def test_plain_chat_openai_drops_the_signature_and_the_endpoint_rejects_it():
+    # The failure this class exists for: the stock client loses extra_content between turns.
+    first = {"role": "assistant", "content": None,
+             "tool_calls": [_tool_call("sig-call", "flights", _SIG)]}
+    _, client = _scripted_endpoint(first)
+    with pytest.raises(Exception, match="thought_signature"):
+        _run(_model(client, cls=ChatOpenAI), _Executor())
+
+
+def test_only_the_tool_call_that_carried_extra_content_gets_it_back():
+    first = {"role": "assistant", "content": None,
+             "tool_calls": [_tool_call("sig-call", "flights", _SIG), _tool_call("c2", "snapshots")]}
+    requests, client = _scripted_endpoint(first)
+    _run(_model(client), _Executor())
+    calls = [m for m in requests[1]["messages"] if m["role"] == "assistant"][0]["tool_calls"]
+    assert calls[0]["extra_content"] == _SIG and "extra_content" not in calls[1]
+
+
+def test_payload_is_identical_to_chat_openai_when_no_extra_content_was_sent():
+    from langchain_core.messages import HumanMessage
+
+    first = {"role": "assistant", "content": None, "tool_calls": [_tool_call("c1", "flights")]}
+    requests, client = _scripted_endpoint(first)
+    _run(_model(client), _Executor())
+    plain_requests, plain_client = _scripted_endpoint(first)
+    _run(_model(plain_client, cls=ChatOpenAI), _Executor())
+    assert requests == plain_requests
+    message = HumanMessage("hi")
+    ours = _model(httpx.Client())._get_request_payload([message])
+    stock = _model(httpx.Client(), cls=ChatOpenAI)._get_request_payload([message])
+    assert ours == stock
+
+
+def test_build_llm_client_returns_the_extras_preserving_model():
+    assert isinstance(build_llm_client(_settings()), ProviderExtrasChatOpenAI)

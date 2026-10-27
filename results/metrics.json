@@ -1,6 +1,6 @@
 {
-  "generated_utc": "2026-10-27T20:48:36+00:00",
-  "commit_sha": "232f0db2e315b69f93d5cadfb653c40a2f4f2dbc",
+  "generated_utc": "2026-10-27T21:12:38+00:00",
+  "commit_sha": "a021fc3057dffe46b14bde10457cafa354dc5713",
   "working_tree_dirty": false,
   "commit_note": "generated at commit_sha and committed afterwards; the sha names the code that was measured, not the commit that holds this file",
   "machine": {
@@ -13,22 +13,22 @@
     "ruff": {
       "exit_code": 0,
       "passed": true,
-      "seconds": 0.109
+      "seconds": 0.127
     },
     "pytest": {
       "command": "pytest -m 'not localstack' (uv --extra agent)",
       "exit_code": 0,
-      "seconds": 34.958,
-      "tests": 310,
+      "seconds": 35.771,
+      "tests": 312,
       "failures": 0,
       "errors": 0,
       "skipped": 31,
-      "passed": 279
+      "passed": 281
     },
     "synthetic_ingest": {
       "command": "rtdp ingest --source synthetic --rows 50",
       "exit_code": 0,
-      "seconds": 1.637,
+      "seconds": 1.632,
       "rows_in_batch": 54,
       "dq_status": "PASS",
       "dq_failure_cases": 0,
@@ -39,7 +39,7 @@
     "dq_gate_demo": {
       "command": "rtdp ingest --source synthetic --inject-failures",
       "exit_code": 1,
-      "seconds": 1.481,
+      "seconds": 1.478,
       "dq_status": "FAIL",
       "dq_failure_cases": 3,
       "rows_written": 0,
@@ -47,7 +47,7 @@
     },
     "serve_probe": {
       "command": "rtdp serve (probed over HTTP on a loopback port)",
-      "seconds_to_livez": 1.299,
+      "seconds_to_livez": 1.307,
       "livez_status": 200,
       "health_status": 200,
       "health_ok": true,

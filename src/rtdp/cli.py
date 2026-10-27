@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
 
 from .config import Settings
@@ -180,8 +181,10 @@ _AGENT_SDK_MODULES = {
 
 def _agent(settings: Settings, args: argparse.Namespace) -> int:
     try:
-        from .agent import llm as _llm  # noqa: F401 — imported lazily later; check the SDK now
         from .agent.runtime import answer_question, build_http_client, build_llm_client
+
+        # runtime imports the model client lazily; load it now so a partial install gets the hint.
+        importlib.import_module("rtdp.agent.llm")
     except ImportError as exc:
         # Only a missing [agent] SDK means "install the extra"; any other ImportError is a real
         # failure (e.g. a bug inside rtdp.agent) and must surface, not be masked.

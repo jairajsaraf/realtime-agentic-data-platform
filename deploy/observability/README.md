@@ -1,5 +1,9 @@
 # Observability assets (E6.3)
 
+**Status:** validated live on the retired host (E6.3); not currently deployed. The single host these
+assets were written for has been shut down, so no Datadog Agent is running and nothing is reporting.
+The files stay as reviewable assets for anyone who redeploys the VM path.
+
 **Key-free** Datadog assets for the rtdp single-host demo (Datadog **US5**). Reviewable JSON/YAML —
 nothing here is applied to Datadog automatically, and they contain no API keys, application keys, org
 IDs, real secrets, or domains. **`/health` and CI never depend on Datadog**; these assets are additive
@@ -42,9 +46,10 @@ suitable error metric is available in your org.
 Repository inspection and official Datadog documentation found **no current `monitors.json` defect**:
 the service-check grouping/order fix already landed in commit `76b6592`, giving the documented
 `.over(...).last(N).by("host").count_by_status()` structure. **Nothing here has been imported or
-live-validated by CI or by this repo.** Final acceptance of the queries — tag resolution, `.by("host")`
-grouping behavior, metric availability, thresholds, and no-data behavior — and the import itself
-**remain pending your manual validation in the live US5 UI** (next section).
+live-validated by CI or by this repo.** The live validation in E6.3 was a manual operator step on the
+retired host, and this repository keeps no recorded output of it. On a new deployment, validate the
+queries — tag resolution, `.by("host")` grouping behavior, metric availability, thresholds, and
+no-data behavior — and the import yourself in the live US5 UI (next section).
 
 ## Monitor validation + import runbook (manual — run by you; never in CI)
 

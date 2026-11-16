@@ -535,7 +535,7 @@ Do these in order to fully stop the demo and its billing:
 
 ---
 
-## J. Hugging Face Space (synthetic-only demo; prepared, not deployed)
+## J. Hugging Face Space (synthetic-only demo)
 
 `deploy/hf-space/` holds a Gradio app that builds a throwaway `file://` warehouse (a dev/CI
 convenience only — not the target architecture), runs two synthetic ingests, and serves the real read
@@ -644,8 +644,8 @@ Remove-Item -Recurse -Force _warehouse, _demo, .localstack -ErrorAction Silently
   is set **and** the `[otel]` extra is installed; nothing is exported during tests, and there is **no
   `/metrics` endpoint**. Any demo serves **synthetic data only**; the agent LLM is external/config-driven
   and never gates CI or `/health`. The single-host stack (Caddy TLS, Datadog boundary validated live
-  in E6.3) ran on a host that is now retired, so nothing is currently deployed; the Space in section J
-  is prepared but not yet created. Multi-host / Kubernetes / real-AWS remains out of scope.
+  in E6.3) ran on a host that is now retired; the current demo is the Space in section J, deployed by
+  `deploy-space`. Multi-host / Kubernetes / real-AWS remains out of scope.
 - **Out of scope:** true streaming (Kafka/Flink), RAG/vector search, fine-tuning, autonomous
   remediation (the Stage D agent proposes; a human applies), orchestration, **product/business-facing
   analytics and operational dashboards** (beyond the Datadog observability dashboard validated in E6.3), real
